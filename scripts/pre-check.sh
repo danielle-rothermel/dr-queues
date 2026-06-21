@@ -41,10 +41,13 @@ run_report "ruff check" "${CACHE_DIR}/ruff-check.txt" \
     uv run ruff check . || status=1
 run_report "ty check" "${CACHE_DIR}/ty-check.txt" \
     uv run ty check || status=1
+run_report "pytest" "${CACHE_DIR}/pytest.txt" \
+    uv run pytest || status=1
 
 printf '\nCheck output files:\n'
 printf '  %s\n' "${CACHE_DIR}/ruff-check.txt"
 printf '  %s\n' "${CACHE_DIR}/ty-check.txt"
+printf '  %s\n' "${CACHE_DIR}/pytest.txt"
 
 if [[ "${status}" -ne 0 ]]; then
     printf '\nFix all reported issues, then rerun:\n'
