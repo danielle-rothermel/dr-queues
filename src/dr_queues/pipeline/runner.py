@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 from dr_queues.amqp.connection import PikaDeliveryMode
 from dr_queues.amqp.queues import build_stage_queues
+from dr_queues.cli import stage_worker_command_prefix
 from dr_queues.events.sink import EventSink
 from dr_queues.manifest.manifest import (
     RunManifest,
@@ -158,8 +158,7 @@ def spawn_stage_worker_process(
     replace: bool = True,
 ) -> subprocess.Popen[bytes]:
     cmd = [
-        sys.executable,
-        "scripts/run_stage_workers.py",
+        *stage_worker_command_prefix(),
         "--manifest",
         str(manifest_path),
         "--stage",

@@ -7,6 +7,27 @@ queues, scaling worker pools per stage, and recording pipeline lifecycle
 events to durable storage. It is the execution substrate for experiment
 applications such as [dr-bottleneck](https://github.com/danielle-rothermel/dr-bottleneck).
 
+## Install
+
+```bash
+pip install dr-queues
+```
+
+Or with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv add dr-queues
+```
+
+RabbitMQ and MongoDB are **not** bundled with the package — run them locally
+(Docker Compose) or point `AMQP_URL` / `MONGODB_URL` at your infrastructure.
+
+After install, try the demo CLI:
+
+```bash
+dr-queues-demo --repeats 2 --lanes 1
+```
+
 ## What dr-queues is
 
 - AMQP staged pipeline: per-stage pending/completed queue pairs chained together
@@ -50,9 +71,19 @@ docker compose up -d
 
 ## Quick start
 
+From a git checkout:
+
 ```bash
 uv sync
 docker compose up -d
+uv run dr-queues-demo \
+  --repeats 5 \
+  --workers slow=4,transform=4,finalize=2
+```
+
+Or use the repo script wrapper (same CLI):
+
+```bash
 uv run python scripts/run_pipeline_demo.py \
   --repeats 5 \
   --workers slow=4,transform=4,finalize=2
@@ -64,8 +95,8 @@ The demo runs a 3-stage dummy pipeline (`sleep_ms` → `add_prefix` →
 Options:
 
 ```bash
-uv run python scripts/run_pipeline_demo.py --sink amqp --repeats 2
-uv run python scripts/run_pipeline_demo.py --sink both --lanes 1 --repeats 1
+dr-queues-demo --sink amqp --repeats 2
+dr-queues-demo --sink both --lanes 1 --repeats 1
 ```
 
 Each run writes a manifest to `.runs/{run_id}/manifest.json`. The demo prints
@@ -142,7 +173,7 @@ Import from `dr_queues`:
 Resize or run a single stage in a separate process:
 
 ```bash
-uv run python scripts/run_stage_workers.py \
+dr-queues-stage-worker \
   --run-id demo-abc123 \
   --stage transform \
   --workers 5 \
@@ -171,10 +202,18 @@ uv run pytest -m integration      # integration tests only; needs docker compose
 Full manual smoke test:
 
 ```bash
-uv run python scripts/run_pipeline_demo.py \
+dr-queues-demo \
   --repeats 5 \
   --workers slow=4,transform=4,finalize=2
 
 # optional: exercise AMQP event sink instead of Mongo
-uv run python scripts/run_pipeline_demo.py --sink amqp --repeats 2
+dr-queues-demo --sink amqp --repeats 2
+```
+
+Build a wheel locally before publishing:
+
+```bash
+uv build
+tar -tzf dist/dr_queues-*.tar.gz | head
+unzip -l dist/dr_queues-*.whl
 ```

@@ -221,7 +221,6 @@ name = "dr-queues"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "marimo", extra = ["recommended"] },
     { name = "pika" },
     { name = "pydantic" },
     { name = "pymongo" },
@@ -230,6 +229,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "marimo", extra = ["recommended"] },
     { name = "pytest" },
     { name = "ruff" },
     { name = "ty" },
@@ -237,7 +237,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "marimo", extras = ["recommended"], specifier = ">=0.23.10" },
     { name = "pika", specifier = ">=1.4.1" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pymongo", specifier = ">=4.16.0" },
@@ -246,6 +245,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "marimo", extras = ["recommended"], specifier = ">=0.23.10" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.15.18" },
     { name = "ty", specifier = ">=0.0.51" },

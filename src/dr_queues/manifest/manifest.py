@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from dr_queues.cli import stage_worker_command_prefix
 from dr_queues.workflow.definition import PipelineDefinition
 
 
@@ -95,10 +96,11 @@ def remove_pid(path: Path) -> None:
 
 
 def format_worker_commands(manifest: RunManifest) -> list[str]:
+    prefix = " ".join(stage_worker_command_prefix())
     commands: list[str] = []
     for stage in manifest.stages:
         commands.append(
-            "uv run python scripts/run_stage_workers.py "
+            f"{prefix} "
             f"--run-id {manifest.run_id} "
             f"--stage {stage.name} "
             f"--workers {stage.default_workers} "
