@@ -1,7 +1,7 @@
 [project]
 name = "dr-queues"
 version = "0.1.0"
-description = "Add your description here"
+description = "RabbitMQ multi-stage pipeline runtime with append-only event sinks"
 readme = "README.md"
 authors = [
     { name = "Danielle Rothermel", email = "danielle.rothermel@gmail.com" }
@@ -9,7 +9,9 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "marimo[recommended]>=0.23.10",
+    "pika>=1.4.1",
     "pydantic>=2.13.4",
+    "pymongo>=4.16.0",
     "typer>=0.26.7",
 ]
 
@@ -24,9 +26,46 @@ dev = [
     "ty>=0.0.51",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests requiring RabbitMQ and/or MongoDB",
+]
+
 [tool.ruff]
-include = ["scripts/**/*.py", "src/**/*.py"]
+include = ["scripts/**/*.py", "src/**/*.py", "tests/**/*.py"]
 line-length = 79
+
+[tool.ruff.lint]
+select = [
+    "A",
+    "ARG",
+    "ASYNC",
+    "DTZ",
+    "FA",
+    "FLY",
+    "FURB",
+    "G",
+    "I",
+    "ICN",
+    "ISC",
+    "LOG",
+    "N",
+    "NPY",
+    "PD",
+    "PIE",
+    "PTH",
+    "PT",
+    "RET",
+    "RSE",
+    "RUF",
+    "SLOT",
+    "T10",
+    "TID",
+    "UP",
+    "W",
+    "YTT",
+]
 
 [tool.ty.src]
 include = ["scripts", "src"]
