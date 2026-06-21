@@ -72,7 +72,3 @@ __all__ = [
     "spawn_stage_worker_process",
     "write_run_manifest",
 ]
-
-
-def hello() -> str:
-    return "Hello from dr-queues!"
