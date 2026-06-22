@@ -1,7 +1,6 @@
 from dr_queues.manifest.manifest import (
     RunManifest,
     RunStageManifest,
-    format_worker_commands,
     load_run_manifest,
     manifest_path,
     parse_workers_arg,
@@ -16,7 +15,6 @@ from dr_queues.manifest.manifest import (
 __all__ = [
     "RunManifest",
     "RunStageManifest",
-    "format_worker_commands",
     "load_run_manifest",
     "manifest_path",
     "parse_workers_arg",

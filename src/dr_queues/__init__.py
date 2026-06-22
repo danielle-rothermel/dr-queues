@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
-from dr_queues.analysis.filter import filter_run_event_dicts, filter_run_events
 from dr_queues.events import (
     AmqpEventSink,
     CompositeEventSink,
@@ -11,11 +10,11 @@ from dr_queues.events import (
     MemoryEventSink,
     MongoEventSink,
     PipelineEvent,
+    filter_run_events,
 )
 from dr_queues.manifest import (
     RunManifest,
     RunStageManifest,
-    format_worker_commands,
     load_run_manifest,
     manifest_path,
     parse_workers_arg,
@@ -61,9 +60,7 @@ __all__ = [
     "TerminalTap",
     "WorkerPool",
     "__version__",
-    "filter_run_event_dicts",
     "filter_run_events",
-    "format_worker_commands",
     "load_run_manifest",
     "manifest_path",
     "parse_workers_arg",

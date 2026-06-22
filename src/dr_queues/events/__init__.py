@@ -5,7 +5,7 @@ from dr_queues.events.amqp import (
 )
 from dr_queues.events.memory import CompositeEventSink, MemoryEventSink
 from dr_queues.events.mongo import MongoEventSink
-from dr_queues.events.schema import EventKind, PipelineEvent
+from dr_queues.events.schema import EventKind, PipelineEvent, filter_run_events
 from dr_queues.events.sink import EventSink
 
 __all__ = [
@@ -18,4 +18,5 @@ __all__ = [
     "MongoEventSink",
     "PipelineEvent",
     "ensure_events_queue",
+    "filter_run_events",
 ]
