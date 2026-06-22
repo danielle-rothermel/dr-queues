@@ -4,7 +4,6 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from dr_queues.cli import stage_worker_command_prefix
 from dr_queues.workflow.definition import PipelineDefinition
 
 
@@ -93,18 +92,3 @@ def write_pid(path: Path, pid: int) -> None:
 def remove_pid(path: Path) -> None:
     if path.exists():
         path.unlink()
-
-
-def format_worker_commands(manifest: RunManifest) -> list[str]:
-    prefix = " ".join(stage_worker_command_prefix())
-    commands: list[str] = []
-    for stage in manifest.stages:
-        commands.append(
-            f"{prefix} "
-            f"--run-id {manifest.run_id} "
-            f"--stage {stage.name} "
-            f"--workers {stage.default_workers} "
-            "--handlers-module dr_queues.demo_handlers "
-            "--replace",
-        )
-    return commands

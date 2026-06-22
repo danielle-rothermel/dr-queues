@@ -15,7 +15,6 @@ from dr_queues.events import (
 from dr_queues.manifest import (
     RunManifest,
     RunStageManifest,
-    format_worker_commands,
     load_run_manifest,
     manifest_path,
     parse_workers_arg,
@@ -63,7 +62,6 @@ __all__ = [
     "__version__",
     "filter_run_event_dicts",
     "filter_run_events",
-    "format_worker_commands",
     "load_run_manifest",
     "manifest_path",
     "parse_workers_arg",
