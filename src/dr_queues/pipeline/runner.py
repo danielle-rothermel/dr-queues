@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from typing import Any
 
 from dr_queues.amqp.connection import PikaDeliveryMode
 from dr_queues.amqp.queues import build_stage_queues
@@ -40,6 +41,7 @@ def setup_run_queues(
     queue_prefix: str | None = None,
     run_store: MongoRunStore | None = None,
     overwrite: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> RunManifest:
     store = run_store or MongoRunStore()
     close_store = run_store is None
@@ -93,7 +95,11 @@ def setup_run_queues(
             queue_prefix=prefix,
             stages=stages,
         )
-        return store.create_run(manifest, overwrite=overwrite)
+        return store.create_run(
+            manifest,
+            overwrite=overwrite,
+            metadata=metadata,
+        )
     finally:
         if close_store:
             store.close()
