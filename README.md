@@ -36,6 +36,7 @@ dr-queues-demo --repeats 2 --lanes 1
 - MongoDB-backed manifests, events, seed batches, worker records, job states,
   failure attempts, and target holds
 - RabbitMQ durable job transport for queued and in-flight work
+- Shared stage eligibility flow for initial seed work and manual replay
 - Minimal workflow engine: ordered steps + `HandlerRegistry`
 
 ## Runtime model
@@ -160,8 +161,9 @@ dr-queues-run wait --run-id YOUR_RUN_ID --target terminal --timeout 120
 
 `status` combines Mongo progress records with RabbitMQ queue snapshots. Expected
 job totals are derived from active seed batches, so adding more seed work to a
-run updates progress automatically. Stage lines report active worker records
-separately from active concurrency:
+run updates progress automatically. Seeded work is first recorded as pending in
+Mongo, then published to the first-stage partition queue. Stage lines report
+active worker records separately from active concurrency:
 
 ```text
 stage=transform completed=10/10 input_depth=0 output_depth=0 worker_records=1/3 worker_concurrency=5
@@ -315,7 +317,9 @@ dr-queues-run holds set \
 
 Workers persist matching jobs as `held` and remove them from the hot queue path.
 After clearing a hold or fixing a failed handler, replay selected work back to
-the correct stage partition queue:
+the correct stage partition queue. Replay uses the latest persisted job state,
+marks the selected jobs pending again, and republishes them to that state's
+stage input queue:
 
 ```bash
 dr-queues-run holds clear \
@@ -336,7 +340,8 @@ provider throttling yet.
 See [`docs/manual_runtime_testing.md`](docs/manual_runtime_testing.md) for the
 manual operational test log covering detached startup, scale up/down,
 kill/restart recovery, duplicate job protection, filesystem persistence
-checks, target-scoped workers, holds, retries, dead letters, and replay.
+checks, target-scoped workers, holds, retries, dead letters, replay, and stage
+eligibility retests.
 See [`docs/design/failure_persistence.md`](docs/design/failure_persistence.md)
 for the current failure persistence design.
 

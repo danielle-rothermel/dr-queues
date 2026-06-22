@@ -20,6 +20,10 @@ _Avoid_: phase, layer
 The processing of one job at one stage, including whether the job runs, waits, is held, fails, completes, or reaches terminal state.
 _Avoid_: handler call, worker event
 
+**Stage eligibility**:
+The condition that a job may be queued for workers at a stage, either from initial seed work or from replay after a held, failed, retry-waiting, or dead-lettered state.
+_Avoid_: enqueue helper, intake
+
 **Job state**:
 The latest operational position of a job for a run and stage.
 _Avoid_: status row, progress record
