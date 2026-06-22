@@ -329,7 +329,13 @@ def test_viewer_service_error_returns_503() -> None:
 def test_viewer_serves_static_assets(client: TestClient) -> None:
     index = client.get("/")
     script = client.get("/assets/app.js")
+    stylesheet = client.get("/assets/styles.css")
 
     assert index.status_code == 200
     assert "dr-queues viewer" in index.text
+    assert 'id="refresh-rate-select"' in index.text
     assert script.status_code == 200
+    assert "REFRESH_RATE_STORAGE_KEY" in script.text
+    assert "refreshInFlight" in script.text
+    assert stylesheet.status_code == 200
+    assert ".refresh-control" in stylesheet.text

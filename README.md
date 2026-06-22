@@ -181,7 +181,8 @@ dr-queues-viewer --run-id YOUR_RUN_ID
 The viewer binds to `127.0.0.1:8765` by default. It shows run summaries,
 stage queue depths, worker records, target holds, blocked jobs, recent failure
 attempts, and recent pipeline events without exposing worker controls or replay
-actions.
+actions. The dashboard includes a local auto-refresh selector with off, 1s, 2s,
+5s, and 10s intervals.
 
 ## Package layout
 

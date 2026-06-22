@@ -1,14 +1,19 @@
-const POLL_MS = 2000;
+const DEFAULT_REFRESH_RATE_MS = 2000;
+const REFRESH_RATE_STORAGE_KEY = "dr-queues-viewer.refreshRateMs";
+const REFRESH_RATE_OPTIONS_MS = new Set([0, 1000, 2000, 5000, 10000]);
 
 const state = {
   runId: null,
   pollId: null,
+  refreshRateMs: DEFAULT_REFRESH_RATE_MS,
+  refreshInFlight: false,
   visible: true,
 };
 
 const nodes = {
   runInput: document.querySelector("#run-id-input"),
   loadRunButton: document.querySelector("#load-run-button"),
+  refreshRateSelect: document.querySelector("#refresh-rate-select"),
   refreshRunsButton: document.querySelector("#refresh-runs-button"),
   runList: document.querySelector("#run-list"),
   message: document.querySelector("#message"),
@@ -36,6 +41,8 @@ async function api(path) {
 }
 
 async function init() {
+  state.refreshRateMs = readStoredRefreshRate();
+  nodes.refreshRateSelect.value = String(state.refreshRateMs);
   nodes.loadRunButton.addEventListener("click", () => {
     loadRun(nodes.runInput.value.trim());
   });
@@ -43,6 +50,9 @@ async function init() {
     if (event.key === "Enter") {
       loadRun(nodes.runInput.value.trim());
     }
+  });
+  nodes.refreshRateSelect.addEventListener("change", () => {
+    setRefreshRate(Number.parseInt(nodes.refreshRateSelect.value, 10));
   });
   nodes.refreshRunsButton.addEventListener("click", refreshRuns);
   document.addEventListener("visibilitychange", () => {
@@ -89,10 +99,10 @@ function loadRun(runId) {
 
 function startPolling() {
   stopPolling();
-  if (!state.visible || !state.runId) {
+  if (!state.visible || !state.runId || state.refreshRateMs === 0) {
     return;
   }
-  state.pollId = window.setInterval(refreshSnapshot, POLL_MS);
+  state.pollId = window.setInterval(refreshSnapshot, state.refreshRateMs);
 }
 
 function stopPolling() {
@@ -103,16 +113,41 @@ function stopPolling() {
 }
 
 async function refreshSnapshot() {
-  if (!state.runId) {
+  if (!state.runId || state.refreshInFlight) {
     return;
   }
+  state.refreshInFlight = true;
   try {
     const snapshot = await api(`/api/runs/${encodeURIComponent(state.runId)}/snapshot`);
     renderSnapshot(snapshot);
     clearMessage();
   } catch (error) {
     showMessage(error.message);
+  } finally {
+    state.refreshInFlight = false;
   }
+}
+
+function setRefreshRate(refreshRateMs) {
+  if (!REFRESH_RATE_OPTIONS_MS.has(refreshRateMs)) {
+    refreshRateMs = DEFAULT_REFRESH_RATE_MS;
+  }
+  state.refreshRateMs = refreshRateMs;
+  nodes.refreshRateSelect.value = String(refreshRateMs);
+  window.localStorage.setItem(REFRESH_RATE_STORAGE_KEY, String(refreshRateMs));
+  if (refreshRateMs > 0 && state.runId && state.visible) {
+    refreshSnapshot();
+  }
+  startPolling();
+}
+
+function readStoredRefreshRate() {
+  const savedValue = window.localStorage.getItem(REFRESH_RATE_STORAGE_KEY);
+  const refreshRateMs = Number.parseInt(savedValue || "", 10);
+  if (REFRESH_RATE_OPTIONS_MS.has(refreshRateMs)) {
+    return refreshRateMs;
+  }
+  return DEFAULT_REFRESH_RATE_MS;
 }
 
 function renderRunList(runs) {
