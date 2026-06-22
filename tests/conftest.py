@@ -61,12 +61,18 @@ def mongo_run_store(mongodb_available: bool) -> MongoRunStore:
         manifests_collection_name=f"test_manifests_{suffix}",
         seed_batches_collection_name=f"test_seed_batches_{suffix}",
         workers_collection_name=f"test_workers_{suffix}",
+        job_states_collection_name=f"test_job_states_{suffix}",
+        job_attempts_collection_name=f"test_job_attempts_{suffix}",
+        target_holds_collection_name=f"test_target_holds_{suffix}",
     )
     yield store
     store._events.drop()
     store._manifests.drop()
     store._seed_batches.drop()
     store._workers.drop()
+    store._job_states.drop()
+    store._job_attempts.drop()
+    store._target_holds.drop()
     store.close()
 
 

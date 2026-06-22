@@ -1,15 +1,21 @@
 from dr_queues.runtime.lifecycle import (
+    WorkerStartError,
     list_workers,
     replace_stage_workers,
     start_stage_workers,
     stop_workers,
 )
 from dr_queues.runtime.models import (
+    JobAttempt,
+    JobAttemptAction,
+    JobState,
+    JobStateStatus,
     QueueSnapshot,
     RunStatus,
     SeedBatch,
     SeedBatchStatus,
     StageRunStatus,
+    TargetHold,
     WorkerProcessRecord,
     WorkerStatus,
 )
@@ -22,9 +28,18 @@ from dr_queues.runtime.store import (
     RunNotFoundError,
     validate_manifest,
 )
+from dr_queues.targeting import (
+    TargetSelector,
+    derive_partition_key,
+    parse_selectors,
+)
 
 __all__ = [
     "DuplicateSeedError",
+    "JobAttempt",
+    "JobAttemptAction",
+    "JobState",
+    "JobStateStatus",
     "ManifestMismatchError",
     "MongoRunStore",
     "QueueSnapshot",
@@ -34,10 +49,15 @@ __all__ = [
     "SeedBatch",
     "SeedBatchStatus",
     "StageRunStatus",
+    "TargetHold",
+    "TargetSelector",
     "WorkerProcessRecord",
+    "WorkerStartError",
     "WorkerStatus",
+    "derive_partition_key",
     "get_run_status",
     "list_workers",
+    "parse_selectors",
     "replace_stage_workers",
     "start_stage_workers",
     "stop_workers",

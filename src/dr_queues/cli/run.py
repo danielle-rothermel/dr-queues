@@ -5,10 +5,15 @@ from pathlib import Path
 import typer
 
 from dr_queues.manifest import parse_workers_arg
-from dr_queues.pipeline.job import JobEnvelope
-from dr_queues.pipeline.runner import seed_run, setup_run_queues
+from dr_queues.pipeline.job import JobEnvelope, seed_jobs
+from dr_queues.pipeline.runner import (
+    declare_partition_queues,
+    seed_run,
+    setup_run_queues,
+)
 from dr_queues.runtime import (
     MongoRunStore,
+    WorkerStartError,
     get_run_status,
     list_workers,
     replace_stage_workers,
@@ -16,12 +21,18 @@ from dr_queues.runtime import (
     stop_workers,
     wait_for_run,
 )
-from dr_queues.runtime.models import WorkerStatus
+from dr_queues.runtime.models import JobStateStatus, WorkerStatus
+from dr_queues.targeting import (
+    parse_blocked_until,
+    parse_selectors,
+)
 from dr_queues.workflow.definition import PipelineDefinition
 from dr_queues.workflow.pipeline import Pipeline
 from dr_queues.workflow.registry import HandlerRegistry
 
 app = typer.Typer(add_completion=False)
+holds_app = typer.Typer(add_completion=False)
+app.add_typer(holds_app, name="holds")
 DEFAULT_HANDLERS_MODULE = "dr_queues.demo_handlers"
 ACTIVE_WORKER_STATUSES = {
     WorkerStatus.RUNNING,
@@ -89,6 +100,14 @@ def status(
         f"run_id={run_id} terminals={run_status.terminal_jobs}/"
         f"{run_status.expected_jobs}",
     )
+    if run_status.job_state_counts:
+        counts = " ".join(
+            f"{status}={count}"
+            for status, count in run_status.job_state_counts.items()
+            if count
+        )
+        if counts:
+            typer.echo(f"job_states {counts}")
     for stage in run_status.stages:
         active_workers = [
             worker
@@ -132,13 +151,21 @@ def start(
         DEFAULT_HANDLERS_MODULE,
         "--handlers-module",
     ),
+    include: list[str] = typer.Option([], "--include"),
+    exclude: list[str] = typer.Option([], "--exclude"),
 ) -> None:
-    process = start_stage_workers(
-        run_id=run_id,
-        stage=stage,
-        workers=workers,
-        handlers_module=handlers_module,
-    )
+    try:
+        process = start_stage_workers(
+            run_id=run_id,
+            stage=stage,
+            workers=workers,
+            handlers_module=handlers_module,
+            include_selectors=parse_selectors(include),
+            exclude_selectors=parse_selectors(exclude),
+        )
+    except WorkerStartError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
     typer.echo(f"started pid={process.pid} run_id={run_id} stage={stage}")
 
 
@@ -151,13 +178,21 @@ def replace(
         DEFAULT_HANDLERS_MODULE,
         "--handlers-module",
     ),
+    include: list[str] = typer.Option([], "--include"),
+    exclude: list[str] = typer.Option([], "--exclude"),
 ) -> None:
-    process = replace_stage_workers(
-        run_id=run_id,
-        stage=stage,
-        workers=workers,
-        handlers_module=handlers_module,
-    )
+    try:
+        process = replace_stage_workers(
+            run_id=run_id,
+            stage=stage,
+            workers=workers,
+            handlers_module=handlers_module,
+            include_selectors=parse_selectors(include),
+            exclude_selectors=parse_selectors(exclude),
+        )
+    except WorkerStartError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
     typer.echo(f"replaced pid={process.pid} run_id={run_id} stage={stage}")
 
 
@@ -189,6 +224,166 @@ def workers(
             f"status={record.status} pid={record.pid} host={record.host} "
             f"workers={record.workers}",
         )
+
+
+@holds_app.command("set")
+def holds_set(
+    run_id: str = typer.Option(..., "--run-id"),
+    selector: list[str] = typer.Option(..., "--selector"),
+    until: str | None = typer.Option(None, "--until"),
+    reason: str | None = typer.Option(None, "--reason"),
+) -> None:
+    selectors = parse_selectors(selector)
+    store = MongoRunStore()
+    try:
+        hold = store.set_target_hold(
+            run_id=run_id,
+            selectors=selectors,
+            blocked_until=parse_blocked_until(until),
+            reason=reason,
+        )
+        typer.echo(f"hold_id={hold.hold_id} run_id={run_id}")
+    finally:
+        store.close()
+
+
+@holds_app.command("clear")
+def holds_clear(
+    run_id: str = typer.Option(..., "--run-id"),
+    selector: list[str] = typer.Option(..., "--selector"),
+) -> None:
+    store = MongoRunStore()
+    try:
+        count = store.clear_target_holds(
+            run_id=run_id,
+            selectors=parse_selectors(selector),
+        )
+        typer.echo(f"cleared={count} run_id={run_id}")
+    finally:
+        store.close()
+
+
+@holds_app.command("list")
+def holds_list(
+    run_id: str = typer.Option(..., "--run-id"),
+    include_cleared: bool = typer.Option(False, "--include-cleared"),
+) -> None:
+    store = MongoRunStore()
+    try:
+        holds = store.list_target_holds(
+            run_id, active_only=not include_cleared
+        )
+        for hold in holds:
+            selectors = ",".join(
+                f"{selector.key}={selector.value}"
+                for selector in hold.selectors
+            )
+            typer.echo(
+                f"hold_id={hold.hold_id} selectors={selectors} "
+                f"blocked_until={hold.blocked_until} cleared_at={hold.cleared_at}",
+            )
+    finally:
+        store.close()
+
+
+@app.command()
+def failures(
+    run_id: str = typer.Option(..., "--run-id"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    store = MongoRunStore()
+    try:
+        states = [
+            state
+            for status in [
+                JobStateStatus.RETRY_WAITING,
+                JobStateStatus.HELD,
+                JobStateStatus.FAILED,
+                JobStateStatus.DEAD_LETTERED,
+            ]
+            for state in store.list_job_states(run_id, status=status)
+        ]
+        if json_output:
+            typer.echo(
+                f"[{','.join(state.model_dump_json() for state in states)}]"
+            )
+            return
+        for state in states:
+            typer.echo(
+                f"job_id={state.job_id} stage={state.stage} "
+                f"status={state.status} partition={state.partition_key} "
+                f"attempts={state.attempt_count} detail={state.failure_detail}",
+            )
+    finally:
+        store.close()
+
+
+@app.command()
+def attempts(
+    run_id: str = typer.Option(..., "--run-id"),
+    job_id: str | None = typer.Option(None, "--job-id"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    store = MongoRunStore()
+    try:
+        records = store.list_job_attempts(run_id, job_id=job_id)
+        if json_output:
+            typer.echo(
+                f"[{','.join(record.model_dump_json() for record in records)}]"
+            )
+            return
+        for record in records:
+            typer.echo(
+                f"job_id={record.job_id} stage={record.stage} "
+                f"attempt={record.attempt_number} action={record.action} "
+                f"error={record.error_type}: {record.error_message}",
+            )
+    finally:
+        store.close()
+
+
+@app.command()
+def replay(
+    run_id: str = typer.Option(..., "--run-id"),
+    job_id: str | None = typer.Option(None, "--job-id"),
+    selector: list[str] = typer.Option([], "--selector"),
+    status: JobStateStatus | None = typer.Option(None, "--status"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    include = parse_selectors(selector)
+    if job_id is None and not include and status is None:
+        raise typer.BadParameter(
+            "Provide --job-id, --selector, or --status to select replay jobs."
+        )
+    store = MongoRunStore()
+    try:
+        manifest = store.get_manifest(run_id)
+        states = store.replayable_job_states(
+            run_id,
+            job_id=job_id,
+            status=status,
+            include=include,
+            force=force,
+        )
+        jobs_by_queue: dict[str, list[JobEnvelope]] = {}
+        for state in states:
+            job = JobEnvelope.model_validate(state.job)
+            job.resolve_partition_key()
+            declare_partition_queues(manifest, job.partition_key)
+            queue_name = manifest.stage_input_queue(
+                state.stage, job.partition_key
+            )
+            store.mark_job_pending(
+                job=job,
+                stage=state.stage,
+                queue_name=queue_name,
+            )
+            jobs_by_queue.setdefault(queue_name, []).append(job)
+        for queue_name, jobs in jobs_by_queue.items():
+            seed_jobs(queue_name=queue_name, jobs=jobs)
+        typer.echo(f"replayed={len(states)} run_id={run_id}")
+    finally:
+        store.close()
 
 
 def run() -> None:

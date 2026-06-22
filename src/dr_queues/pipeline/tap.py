@@ -22,11 +22,13 @@ class TerminalTap:
         self,
         *,
         completed_queue: str,
+        completed_queues: list[str] | None = None,
         run_id: str,
         expected_count: int,
         run_store: MongoRunStore,
     ) -> None:
         self.completed_queue = completed_queue
+        self.completed_queues = completed_queues or [completed_queue]
         self.run_id = run_id
         self.expected_count = expected_count
         self.run_store = run_store
@@ -61,11 +63,12 @@ class TerminalTap:
         connection = open_connection()
         channel = connection.channel()
         channel.basic_qos(prefetch_count=1)
-        channel.basic_consume(
-            queue=self.completed_queue,
-            on_message_callback=self._on_message,
-            auto_ack=False,
-        )
+        for queue_name in self.completed_queues:
+            channel.basic_consume(
+                queue=queue_name,
+                on_message_callback=self._on_message,
+                auto_ack=False,
+            )
         while not self._stop.is_set() and not self._done.is_set():
             connection.process_data_events(time_limit=0.5)
         if channel.is_open:
@@ -95,6 +98,11 @@ class TerminalTap:
                 event=EventKind.TERMINAL,
                 payload=job.model_dump(),
             ),
+        )
+        self.run_store.mark_job_terminal(
+            job=job,
+            stage=STAGE_NAME,
+            queue_name=getattr(method, "routing_key", self.completed_queue),
         )
         channel.basic_ack(delivery_tag=tag)
         if self._terminal_count() >= self.expected_count:

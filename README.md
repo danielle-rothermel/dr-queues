@@ -33,7 +33,8 @@ dr-queues-demo --repeats 2 --lanes 1
 - AMQP staged pipeline: per-stage pending/completed queue pairs chained together
 - Slim `JobEnvelope` for job state on the wire
 - `WorkerPool` and `TerminalTap` with pluggable step handlers
-- MongoDB-backed manifests, events, seed batches, and worker records
+- MongoDB-backed manifests, events, seed batches, worker records, job states,
+  failure attempts, and target holds
 - RabbitMQ durable job transport for queued and in-flight work
 - Minimal workflow engine: ordered steps + `HandlerRegistry`
 
@@ -43,9 +44,11 @@ dr-queues uses RabbitMQ and MongoDB for different jobs:
 
 - **RabbitMQ** is the durable queue transport. It owns pending messages,
   completed-stage messages, delivery acknowledgements, redelivery, and queue
-  depth.
+  depth. Jobs with target tags can be routed through partition-specific queues
+  so workers can consume only matching target subsets.
 - **MongoDB** is the persistence and query layer. It owns run manifests,
-  seed-batch records, pipeline events, and detached worker process records.
+  seed-batch records, pipeline events, detached worker process records, latest
+  per-job runtime state, failure attempt history, and target holds.
 
 There is no filesystem-backed runtime store. New runs should not create
 `.runs/<run_id>` state.
@@ -115,8 +118,10 @@ On success you should see output like `events=70 terminals=10` for
 ### Inspect MongoDB runtime state
 
 Run manifests live in `run_manifests`, events in `pipeline_events`, seed
-batches in `seed_batches`, and worker records in `worker_processes`. Replace
-`YOUR_RUN_ID` with the `run_id` printed by the demo.
+batches in `seed_batches`, worker records in `worker_processes`, latest job
+state in `job_states`, failure attempt history in `job_attempts`, and target
+holds in `target_holds`. Replace `YOUR_RUN_ID` with the `run_id` printed by the
+demo.
 
 Count events for one run:
 
@@ -173,6 +178,7 @@ If counts are zero, check that MongoDB is running and that you used the actual
 | `events/` | `PipelineEvent`, local test sink, event filters |
 | `manifest/` | Run manifest models and worker spec parsing |
 | `runtime/` | Mongo run store, status, wait, worker lifecycle |
+| `targeting.py` | Target selectors and partition-key derivation |
 | `workflow/` | `PipelineDefinition`, `HandlerRegistry`, `Pipeline` |
 
 ## Public API
@@ -181,6 +187,7 @@ Import from `dr_queues`:
 
 - **Setup / run:** `setup_run_queues`, `seed_run`, `run_in_process`
 - **Runtime:** `MongoRunStore`, `get_run_status`, `wait_for_run`, `WorkerPool`, `TerminalTap`, `JobEnvelope`
+- **Failure controls:** `JobState`, `JobStateStatus`, `JobAttempt`, `JobAttemptAction`, `TargetHold`, `TargetSelector`
 - **Workflow:** `PipelineDefinition`, `HandlerRegistry`, `Pipeline`
 - **Events:** `PipelineEvent`, `filter_run_events`
 
@@ -225,14 +232,76 @@ dr-queues-run replace \
   --workers 5
 ```
 
+Workers can also include or exclude target subsets. This is useful when one
+provider, model, or quota pool is paused but unrelated work can keep moving:
+
+```bash
+dr-queues-run start \
+  --run-id demo-abc123 \
+  --stage transform \
+  --workers 5 \
+  --include provider=openai
+```
+
+If a selector matches no known partitions, `start` and `replace` exit nonzero
+instead of reporting a started worker.
+
 `wait --target terminal` also consumes final-stage completed messages through a
 terminal tap, so detached runs can reach terminal completion without an
 in-process runner.
 
+## Failure controls and replay
+
+Handler failures are persisted in MongoDB. The worker records an append-only
+attempt in `job_attempts`, updates the latest `job_states` record, and then
+acknowledges the RabbitMQ delivery after persistence succeeds. Retryable
+failures move to `retry_waiting`; jobs that exhaust their attempt budget move
+to `dead_lettered`.
+
+Inspect failed, held, retry-waiting, and dead-lettered jobs:
+
+```bash
+dr-queues-run failures --run-id demo-abc123
+dr-queues-run attempts --run-id demo-abc123
+```
+
+Set a temporary target hold, for example when a provider quota pool is
+rate-limited:
+
+```bash
+dr-queues-run holds set \
+  --run-id demo-abc123 \
+  --selector quota_pool=gemini-flash \
+  --until +30m \
+  --reason rate-limit
+```
+
+Workers persist matching jobs as `held` and remove them from the hot queue path.
+After clearing a hold or fixing a failed handler, replay selected work back to
+the correct stage partition queue:
+
+```bash
+dr-queues-run holds clear \
+  --run-id demo-abc123 \
+  --selector quota_pool=gemini-flash
+
+dr-queues-run replay \
+  --run-id demo-abc123 \
+  --selector quota_pool=gemini-flash \
+  --status held \
+  --force
+```
+
+Replay is manual in this version. There is no background scheduler for
+`retry_waiting` jobs, automatic replay after hold expiry, or token-bucket
+provider throttling yet.
+
 See [`docs/manual_runtime_testing.md`](docs/manual_runtime_testing.md) for the
 manual operational test log covering detached startup, scale up/down,
-kill/restart recovery, duplicate seed protection, and filesystem persistence
-checks.
+kill/restart recovery, duplicate seed protection, filesystem persistence
+checks, target-scoped workers, holds, retries, dead letters, and replay.
+See [`docs/design/failure_persistence.md`](docs/design/failure_persistence.md)
+for the current failure persistence design.
 
 ## Future layers
 
@@ -257,6 +326,9 @@ dr-queues-demo \
   --repeats 5 \
   --workers slow=4,transform=4,finalize=2
 ```
+
+For failure-control scenarios, follow the tested flows in
+[`docs/manual_runtime_testing.md`](docs/manual_runtime_testing.md).
 
 Build a wheel locally before publishing:
 

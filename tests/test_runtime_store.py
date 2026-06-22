@@ -6,14 +6,18 @@ import pytest
 
 from dr_queues.events.schema import EventKind, PipelineEvent
 from dr_queues.manifest import RunManifest, RunStageManifest
+from dr_queues.pipeline.job import JobEnvelope
 from dr_queues.runtime import (
     DuplicateSeedError,
+    JobAttemptAction,
+    JobStateStatus,
     MongoRunStore,
     RunAlreadyExistsError,
     WorkerProcessRecord,
     WorkerStatus,
 )
 from dr_queues.runtime.models import EventProgress
+from dr_queues.targeting import parse_blocked_until, parse_selectors
 from dr_queues.workflow.definition import (
     PipelineDefinition,
     PipelineLane,
@@ -124,3 +128,96 @@ def test_mongo_run_store_worker_stop_transition(
     assert len(records) == 1
     assert stopped is not None
     assert stopped.status == WorkerStatus.STOP_REQUESTED
+
+
+@pytest.mark.integration
+def test_mongo_run_store_records_retry_and_dead_letter_attempts(
+    mongo_run_store: MongoRunStore,
+) -> None:
+    job = JobEnvelope(
+        run_id="run-1",
+        job_id="job-1",
+        lane="lane-a",
+        repeat=0,
+        pipeline_id="demo",
+        target_tags={"quota_pool": "gemini-flash"},
+    )
+    job.resolve_partition_key()
+
+    first = mongo_run_store.record_job_failure(
+        job=job,
+        stage="parse",
+        queue_name="queue",
+        error=RuntimeError("rate limited"),
+        max_attempts=2,
+        retry_delay_seconds=60,
+    )
+    second = mongo_run_store.record_job_failure(
+        job=job,
+        stage="parse",
+        queue_name="queue",
+        error=RuntimeError("still limited"),
+        max_attempts=2,
+        retry_delay_seconds=60,
+    )
+    states = mongo_run_store.list_job_states("run-1", stage="parse")
+
+    assert first.action == JobAttemptAction.RETRY_WAITING
+    assert second.action == JobAttemptAction.DEAD_LETTERED
+    assert len(states) == 1
+    assert states[0].status == JobStateStatus.DEAD_LETTERED
+    assert states[0].attempt_count == 2
+    assert states[0].partition_key == "gemini-flash"
+
+
+@pytest.mark.integration
+def test_mongo_run_store_target_holds_and_partition_selection(
+    mongo_run_store: MongoRunStore,
+) -> None:
+    openai = JobEnvelope(
+        run_id="run-1",
+        job_id="job-openai",
+        lane="lane-a",
+        repeat=0,
+        pipeline_id="demo",
+        target_tags={"provider": "openai", "model": "nano"},
+    )
+    gemini = JobEnvelope(
+        run_id="run-1",
+        job_id="job-gemini",
+        lane="lane-a",
+        repeat=0,
+        pipeline_id="demo",
+        target_tags={"provider": "gemini", "model": "flash"},
+    )
+    for job in [openai, gemini]:
+        job.resolve_partition_key()
+        mongo_run_store.mark_job_pending(
+            job=job,
+            stage="parse",
+            queue_name=f"queue.{job.partition_key}",
+        )
+
+    hold = mongo_run_store.set_target_hold(
+        run_id="run-1",
+        selectors=parse_selectors(["provider=gemini"]),
+        blocked_until=parse_blocked_until("+30m"),
+    )
+    partitions = mongo_run_store.list_stage_partitions(
+        run_id="run-1",
+        stage="parse",
+        include=parse_selectors(["provider=openai"]),
+    )
+    missing_partitions = mongo_run_store.list_stage_partitions(
+        run_id="run-1",
+        stage="parse",
+        include=parse_selectors(["provider=anthropic"]),
+    )
+
+    assert hold.is_active
+    assert mongo_run_store.active_hold_for_tags(
+        run_id="run-1",
+        tags=gemini.target_tags,
+    )
+    assert partitions == [openai.partition_key]
+    assert missing_partitions == []
