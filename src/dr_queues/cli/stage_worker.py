@@ -12,6 +12,7 @@ from dr_queues.pipeline.workers import WorkerPool
 from dr_queues.runtime.lifecycle import current_host
 from dr_queues.runtime.models import WorkerProcessRecord, WorkerStatus
 from dr_queues.runtime.store import MongoRunStore
+from dr_queues.targeting import parse_selectors
 from dr_queues.workflow.pipeline import Pipeline
 from dr_queues.workflow.registry import HandlerRegistry
 
@@ -37,6 +38,8 @@ def main(
         "dr_queues.demo_handlers",
         "--handlers-module",
     ),
+    include: list[str] = typer.Option([], "--include"),
+    exclude: list[str] = typer.Option([], "--exclude"),
 ) -> None:
     run_store = MongoRunStore()
     run_manifest = run_store.get_manifest(run_id)
@@ -51,14 +54,21 @@ def main(
     registry = _load_registry(handlers_module)
     pipeline = Pipeline(run_manifest.pipeline_definition, registry)
     handler = pipeline.make_handler(stage_entry.step_index)
-    pool = WorkerPool(
-        input_queue=stage_entry.input_queue,
-        output_queue=stage_entry.output_queue,
-        handler=handler,
-        event_sink=run_store,
-        workers=workers,
-        stage_name=stage_entry.name,
+    include_selectors = parse_selectors(include)
+    exclude_selectors = parse_selectors(exclude)
+    partitions = run_store.list_stage_partitions(
+        run_id=run_id,
+        stage=stage,
+        include=include_selectors,
+        exclude=exclude_selectors,
     )
+    if not partitions:
+        typer.echo("No matching partitions for selectors.", err=True)
+        raise typer.Exit(code=1)
+    input_queues = [
+        run_manifest.stage_input_queue(stage_entry.name, partition)
+        for partition in partitions
+    ]
 
     record = run_store.register_worker(
         WorkerProcessRecord(
@@ -68,11 +78,27 @@ def main(
             host=current_host(),
             workers=workers,
             handlers_module=handlers_module,
+            include_selectors=include_selectors,
+            exclude_selectors=exclude_selectors,
         ),
+    )
+    pool = WorkerPool(
+        input_queue=input_queues[0],
+        input_queues=input_queues,
+        output_queue=stage_entry.output_queue,
+        output_queue_for_job=lambda job: run_manifest.stage_output_queue(
+            stage_entry.name,
+            job.partition_key,
+        ),
+        handler=handler,
+        event_sink=run_store,
+        workers=workers,
+        stage_name=stage_entry.name,
+        worker_id=record.worker_id,
     )
     typer.echo(
         f"worker_id={record.worker_id} stage={stage} "
-        f"workers={workers} input={stage_entry.input_queue}",
+        f"workers={workers} inputs={','.join(input_queues)}",
     )
     heartbeat_stop = Event()
     heartbeat = Thread(

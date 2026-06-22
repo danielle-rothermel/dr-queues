@@ -9,6 +9,7 @@ import sys
 from dr_queues.cli import stage_worker_command_prefix
 from dr_queues.runtime.models import WorkerProcessRecord, WorkerStatus
 from dr_queues.runtime.store import MongoRunStore
+from dr_queues.targeting import TargetSelector
 
 DEFAULT_STOP_SIGNAL = signal.SIGTERM
 
@@ -23,6 +24,8 @@ def start_stage_workers(
     stage: str,
     workers: int,
     handlers_module: str,
+    include_selectors: list[TargetSelector] | None = None,
+    exclude_selectors: list[TargetSelector] | None = None,
 ) -> subprocess.Popen[bytes]:
     cmd = [
         *stage_worker_command_prefix(),
@@ -35,6 +38,10 @@ def start_stage_workers(
         "--handlers-module",
         handlers_module,
     ]
+    for selector in include_selectors or []:
+        cmd.extend(["--include", f"{selector.key}={selector.value}"])
+    for selector in exclude_selectors or []:
+        cmd.extend(["--exclude", f"{selector.key}={selector.value}"])
     return subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
@@ -50,6 +57,8 @@ def replace_stage_workers(
     stage: str,
     workers: int,
     handlers_module: str,
+    include_selectors: list[TargetSelector] | None = None,
+    exclude_selectors: list[TargetSelector] | None = None,
     run_store: MongoRunStore | None = None,
 ) -> subprocess.Popen[bytes]:
     stop_workers(run_id=run_id, stage=stage, run_store=run_store)
@@ -58,6 +67,8 @@ def replace_stage_workers(
         stage=stage,
         workers=workers,
         handlers_module=handlers_module,
+        include_selectors=include_selectors,
+        exclude_selectors=exclude_selectors,
     )
 
 

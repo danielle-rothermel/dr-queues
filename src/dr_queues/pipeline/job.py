@@ -9,6 +9,10 @@ from dr_queues.amqp.connection import (
     ChannelSession,
     PikaDeliveryMode,
 )
+from dr_queues.targeting import (
+    DEFAULT_PARTITION_KEY,
+    derive_partition_key,
+)
 
 
 class JobEnvelope(BaseModel):
@@ -18,9 +22,15 @@ class JobEnvelope(BaseModel):
     repeat: int
     step_index: int = 0
     pipeline_id: str
+    target_tags: dict[str, str] = Field(default_factory=dict)
+    partition_key: str = DEFAULT_PARTITION_KEY
     payload: dict[str, Any] = Field(default_factory=dict)
     step_outputs: dict[str, Any] = Field(default_factory=dict)
     step_records: dict[str, Any] = Field(default_factory=dict)
+
+    def resolve_partition_key(self) -> None:
+        if self.partition_key == DEFAULT_PARTITION_KEY:
+            self.partition_key = derive_partition_key(self.target_tags)
 
     def to_json(self) -> bytes:
         return self.model_dump_json().encode("utf-8")

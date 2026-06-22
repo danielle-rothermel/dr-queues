@@ -11,6 +11,7 @@ from dr_queues.runtime.models import (
     RunStatus,
     StageRunStatus,
     WaitTarget,
+    count_job_states,
 )
 from dr_queues.runtime.store import MongoRunStore
 
@@ -41,6 +42,19 @@ def queue_snapshot(queue_name: str) -> QueueSnapshot:
         session.close()
 
 
+def aggregate_queue_snapshot(
+    queue_names: list[str],
+    *,
+    label: str,
+) -> QueueSnapshot:
+    snapshots = [queue_snapshot(queue_name) for queue_name in queue_names]
+    return QueueSnapshot(
+        name=label,
+        ready_messages=sum(snapshot.ready_messages for snapshot in snapshots),
+        consumers=sum(snapshot.consumers for snapshot in snapshots),
+    )
+
+
 def get_run_status(
     run_id: str,
     *,
@@ -64,10 +78,15 @@ def build_run_status(
     events = run_store.read_by_run_id(manifest.run_id)
     progress = EventProgress.from_events(events)
     workers = run_store.list_workers(manifest.run_id)
+    job_states = run_store.list_job_states(manifest.run_id)
+    partitions = run_store.list_run_partitions(manifest.run_id)
     stages: list[StageRunStatus] = []
     for stage in manifest.stages:
         started = progress.stage_started.get(stage.name, set())
         completed = progress.stage_completed.get(stage.name, set())
+        stage_states = [
+            state for state in job_states if state.stage == stage.name
+        ]
         stage_workers = [
             worker for worker in workers if worker.stage == stage.name
         ]
@@ -78,9 +97,22 @@ def build_run_status(
                 started_jobs=len(started),
                 completed_jobs=len(completed),
                 in_flight_jobs=max(0, len(started) - len(completed)),
-                input_queue=queue_snapshot(stage.input_queue),
-                output_queue=queue_snapshot(stage.output_queue),
+                input_queue=aggregate_queue_snapshot(
+                    [
+                        manifest.stage_input_queue(stage.name, partition)
+                        for partition in partitions
+                    ],
+                    label=stage.input_queue,
+                ),
+                output_queue=aggregate_queue_snapshot(
+                    [
+                        manifest.stage_output_queue(stage.name, partition)
+                        for partition in partitions
+                    ],
+                    label=stage.output_queue,
+                ),
                 workers=stage_workers,
+                job_state_counts=count_job_states(stage_states),
             ),
         )
     return RunStatus(
@@ -90,6 +122,7 @@ def build_run_status(
         terminal_jobs=len(progress.terminal_jobs),
         stages=stages,
         workers=workers,
+        job_state_counts=count_job_states(job_states),
     )
 
 
@@ -114,8 +147,16 @@ def wait_for_run(
                 from dr_queues.pipeline.tap import TerminalTap
 
                 final_stage = status.manifest.stages[-1]
+                partitions = store.list_run_partitions(run_id)
                 tap = TerminalTap(
                     completed_queue=final_stage.output_queue,
+                    completed_queues=[
+                        status.manifest.stage_output_queue(
+                            final_stage.name,
+                            partition,
+                        )
+                        for partition in partitions
+                    ],
                     run_id=run_id,
                     expected_count=status.expected_jobs,
                     run_store=store,

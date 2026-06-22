@@ -1,159 +1,165 @@
 # Failure Persistence
 
-This document describes the repository's current behavior for failed runs,
-failed jobs, retries, and related operational state.
+This document describes the current failure-tracking, retry, hold, and
+target-aware queue behavior.
 
 ## Queue Topology
 
-Runs are represented in RabbitMQ as chained stage queues. Each stage has a
-pending queue and a completed queue, named from the run-specific prefix, for
-example:
+Runs still use chained RabbitMQ stage queues. Untagged jobs use the original
+stage queue names, for example:
 
 - `run.<run_id>.s1.pending`
 - `run.<run_id>.s1.completed`
 - `run.<run_id>.s2.completed`
 
-Later stages consume from the previous stage's completed queue. Queue
-declaration is handled by `StageQueues` and `build_stage_queues` in
-`src/dr_queues/amqp/queues.py`.
+Jobs can also carry generic `target_tags` and a derived `partition_key`. Tagged
+jobs are routed through partition-specific queues derived from the stage queue
+name, for example:
 
-There is no dedicated failed-run queue, failed-job queue, dead-letter queue, or
-retry queue declared by the library today.
+- `run.<run_id>.s1.pending.partition.gemini-flash`
+- `run.<run_id>.s1.completed.partition.gemini-flash`
+
+Later stages consume from the previous stage's partition-specific completed
+queue. This lets workers target only matching partitions instead of pulling
+unwanted jobs and requeueing them.
+
+## Target Metadata
+
+The core runtime stays domain-free. It understands generic string tags and
+selectors, not provider-specific concepts.
+
+Examples:
+
+- `provider=gemini`
+- `model=flash`
+- `quota_pool=gemini-flash`
+
+If `quota_pool` is present, it becomes the partition key. Otherwise the
+partition key is derived from the sorted tag set. Jobs without tags use the
+`default` partition and preserve the previous queue behavior.
 
 ## Persistent Runtime State
 
-MongoDB stores several durable runtime records:
+MongoDB stores the original runtime collections:
 
-- `run_manifests`: run definitions, expected job count, stage queue names, and
-  pipeline metadata.
-- `pipeline_events`: append-only progress events for stage starts, stage
-  outputs, and terminal completion.
-- `seed_batches`: records of jobs seeded into a run, including seed publishing
-  failures.
-- `worker_processes`: detached worker process records and lifecycle state.
+- `run_manifests`
+- `pipeline_events`
+- `seed_batches`
+- `worker_processes`
 
-These collections are managed by `MongoRunStore` in
-`src/dr_queues/runtime/store.py`.
+It also stores operational failure/control state:
 
-## Pipeline Events
+- `job_states`: latest state per run/job/stage.
+- `job_attempts`: append-only failure attempt ledger.
+- `target_holds`: active or cleared manual holds keyed by selectors.
 
-Pipeline events are persisted only for successful progress points:
+`pipeline_events` remains the successful progress event log. Failure and
+control-plane state lives in the dedicated runtime collections.
 
-- `stage_started`
-- `stage_output`
+## Job State
+
+`job_states` tracks operational states such as:
+
+- `pending`
+- `running`
+- `completed`
+- `retry_waiting`
+- `held`
+- `failed`
+- `dead_lettered`
 - `terminal`
 
-There is no persisted pipeline event type for handler failure, retry attempt,
-dead-lettering, or run failure. The event schema is defined in
-`src/dr_queues/events/schema.py`.
-
-Because `stage_started` is written before a handler runs, a job that repeatedly
-fails and is requeued can produce multiple start events for the same stage and
-job. Runtime status deduplicates these by job id when computing progress.
+Run status includes job-state counts so an incomplete run can show whether work
+is held, retry-waiting, or dead-lettered.
 
 ## Worker Handler Failures
 
-When a worker receives a job, it appends a `stage_started` event before calling
-the stage handler. If the handler raises an exception, `WorkerPool`:
+When a worker receives a job, it records the job as running and appends the
+existing `stage_started` event. If the handler raises an exception, the worker:
 
-1. prints a `failed` worker log line to stdout,
-2. negatively acknowledges the RabbitMQ delivery with `requeue=True`,
-3. returns without appending a durable failure event.
+1. records a `job_attempts` entry with error type/message, attempt number,
+   worker id, and selected action,
+2. updates `job_states` to `retry_waiting` or `dead_lettered`,
+3. acknowledges the RabbitMQ delivery after persistence succeeds.
 
-The failed job remains in RabbitMQ and can be delivered again. The exception
-message, traceback, attempt count, and failure timestamp are not persisted in
-MongoDB.
+This replaces the old unbounded immediate `basic_nack(..., requeue=True)` path
+when the event sink supports the durable runtime methods.
 
 ## Retry Behavior
 
-Retry support exists only as RabbitMQ redelivery after
-`basic_nack(..., requeue=True)`.
+Retries are explicit and bounded. A failed attempt is moved to
+`retry_waiting` until it reaches the configured maximum attempt count. Once the
+attempt limit is reached, the job is moved to `dead_lettered`.
 
-The retry behavior is:
+The v1 implementation records `not_before` for retry-waiting jobs and provides
+manual replay tooling. It does not yet include an always-on scheduler or
+automatic token-bucket throttling.
 
-- implicit,
-- immediate,
-- unbounded,
-- not backoff-based,
-- not attempt-counted,
-- not classified by transient versus permanent failure,
-- not visible as a structured persisted record.
+## Target Holds
 
-There is no configured maximum attempt count and no dead-letter transition after
-repeated failures.
+Operators can set a hold for matching target tags, optionally until a timestamp
+or relative duration. For example:
 
-## Seed Publishing Failures
+```bash
+dr-queues-run holds set \
+  --run-id RUN_ID \
+  --selector quota_pool=gemini-flash \
+  --until +30m
+```
 
-Seed publishing has explicit persistence. `seed_run` creates a seed batch before
-publishing jobs. If publishing raises an exception, the seed batch is updated to:
+Workers check active holds before invoking handlers. If a job matches an active
+hold, the worker stores it as `held` and acknowledges the RabbitMQ delivery so it
+leaves the hot queue path.
 
-- `status = failed`
-- `failed_at = <timestamp>`
-- `failure_detail = <exception string>`
+Clearing a hold removes the target block. Held jobs can then be replayed with
+the replay command.
 
-This records failures while placing the initial jobs onto RabbitMQ. It does not
-cover failures that happen later inside stage handlers.
+## Selective Workers
 
-## Worker Process State
+Detached workers can be started with include/exclude selectors:
 
-Detached worker processes are stored in `worker_processes` with these statuses:
+```bash
+dr-queues-run start \
+  --run-id RUN_ID \
+  --stage score \
+  --workers 4 \
+  --include provider=openai
+```
 
-- `running`
-- `stop_requested`
-- `stopped`
-- `stale`
+The worker process resolves matching partitions from MongoDB job state and
+consumes only those partition queues. If no partition matches, the stage worker
+exits instead of falling back to the default queue.
 
-Workers heartbeat while running. If a running worker has not heartbeat recently,
-the store can mark it `stale`.
+## Manual Remediation
 
-There is no `failed` worker status. A crashed or unreachable worker is inferred
-through stale heartbeat state rather than a persisted crash/failure record.
+The CLI exposes manual inspection and remediation commands:
 
-## Run Status
+- `dr-queues-run failures`
+- `dr-queues-run attempts`
+- `dr-queues-run holds set`
+- `dr-queues-run holds clear`
+- `dr-queues-run holds list`
+- `dr-queues-run replay`
 
-Run status is derived from persisted events and RabbitMQ queue snapshots.
-`RunStatus.is_complete` returns true when the number of terminal job events
-meets or exceeds the run's expected job count.
+Replay republishes selected held, retry-waiting, failed, or dead-lettered jobs
+to the correct stage partition queue and marks them pending.
 
-There is no run-level status field such as:
+## Remaining Limits
 
-- `created`
-- `running`
-- `completed`
-- `failed`
-- `timed_out`
+The current implementation does not yet provide:
 
-As a result, a run with a permanently failing job remains incomplete rather than
-being marked failed. `wait_for_run` returns the latest status when its timeout
-expires, but it does not persist a timeout or failure state.
+- automatic background release of retry-waiting jobs,
+- automatic replay after a hold expires,
+- token-bucket or lease-based provider throttling,
+- provider-specific rate-limit classification,
+- a run-level failed status field.
 
-## Operational Interpretation
-
-The current system is durable for queued work and successful progress telemetry.
-It can answer questions such as:
-
-- Which run manifest was created?
-- Which jobs reached each stage output?
-- Which jobs reached terminal completion?
-- How many messages are ready in each queue?
-- Which worker records are running, stopped, stop-requested, or stale?
-- Did initial seed publishing fail?
-
-It cannot directly answer, from persisted structured state alone:
-
-- Which jobs failed in a handler?
-- How many attempts has a job made?
-- What exception caused a job to retry?
-- Which failures are permanent versus transient?
-- Which jobs have exhausted retries?
-- Which runs are failed?
-- Which failed jobs are waiting in a failed-job queue?
+Those can be layered on top of the new durable job state, attempt ledger, target
+holds, and partitioned queues.
 
 ## Conclusion
 
-The current failure model is best described as durable progress tracking with
-implicit RabbitMQ redelivery. Failed handler attempts are retried by requeueing
-the same message, but they are not persisted as first-class failure records.
-Seed publishing failures and worker lifecycle state are persisted, but run-level
-failure, job-level failure history, bounded retries, and dead-letter handling are
-not implemented.
+The failure model is now durable and operator-visible. RabbitMQ carries eligible
+work; MongoDB owns the operational truth for job state, attempts, target holds,
+and replay decisions. This supports manual rate-limit response and targeted
+workers while keeping provider-specific policy outside the core queue runtime.

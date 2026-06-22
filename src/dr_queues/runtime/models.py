@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
 from dr_queues.events.schema import PipelineEvent
 from dr_queues.manifest.manifest import RunManifest
+from dr_queues.targeting import TargetSelector
 
 
 def utc_now_iso() -> str:
@@ -29,6 +31,22 @@ class WorkerStatus(StrEnum):
 
 class WaitTarget(StrEnum):
     TERMINAL = "terminal"
+
+
+class JobStateStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    RETRY_WAITING = "retry_waiting"
+    HELD = "held"
+    FAILED = "failed"
+    DEAD_LETTERED = "dead_lettered"
+    TERMINAL = "terminal"
+
+
+class JobAttemptAction(StrEnum):
+    RETRY_WAITING = "retry_waiting"
+    DEAD_LETTERED = "dead_lettered"
 
 
 class SeedBatch(BaseModel):
@@ -57,6 +75,55 @@ class WorkerProcessRecord(BaseModel):
     stop_requested_at: str | None = None
     stopped_at: str | None = None
     command: list[str] = Field(default_factory=list)
+    include_selectors: list[TargetSelector] = Field(default_factory=list)
+    exclude_selectors: list[TargetSelector] = Field(default_factory=list)
+
+
+class JobState(BaseModel):
+    run_id: str
+    job_id: str
+    stage: str
+    status: JobStateStatus
+    partition_key: str
+    target_tags: dict[str, str] = Field(default_factory=dict)
+    queue_name: str
+    job: dict[str, Any]
+    attempt_count: int = 0
+    not_before: str | None = None
+    held_until: str | None = None
+    hold_id: str | None = None
+    failure_detail: str | None = None
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
+class JobAttempt(BaseModel):
+    attempt_id: str = Field(default_factory=lambda: str(uuid4()))
+    run_id: str
+    job_id: str
+    stage: str
+    partition_key: str
+    target_tags: dict[str, str] = Field(default_factory=dict)
+    attempt_number: int
+    action: JobAttemptAction
+    error_type: str
+    error_message: str
+    worker_id: str | None = None
+    created_at: str = Field(default_factory=utc_now_iso)
+
+
+class TargetHold(BaseModel):
+    hold_id: str = Field(default_factory=lambda: str(uuid4()))
+    run_id: str
+    selectors: list[TargetSelector]
+    reason: str | None = None
+    blocked_until: str | None = None
+    created_at: str = Field(default_factory=utc_now_iso)
+    cleared_at: str | None = None
+
+    @property
+    def is_active(self) -> bool:
+        return self.cleared_at is None
 
 
 class QueueSnapshot(BaseModel):
@@ -74,6 +141,7 @@ class StageRunStatus(BaseModel):
     input_queue: QueueSnapshot
     output_queue: QueueSnapshot
     workers: list[WorkerProcessRecord] = Field(default_factory=list)
+    job_state_counts: dict[JobStateStatus, int] = Field(default_factory=dict)
 
     @property
     def is_complete(self) -> bool:
@@ -87,6 +155,7 @@ class RunStatus(BaseModel):
     terminal_jobs: int
     stages: list[StageRunStatus]
     workers: list[WorkerProcessRecord] = Field(default_factory=list)
+    job_state_counts: dict[JobStateStatus, int] = Field(default_factory=dict)
 
     @property
     def is_complete(self) -> bool:
@@ -116,3 +185,10 @@ class EventProgress(BaseModel):
                 case "terminal":
                     progress.terminal_jobs.add(event.job_id)
         return progress
+
+
+def count_job_states(states: list[JobState]) -> dict[JobStateStatus, int]:
+    counts = dict.fromkeys(JobStateStatus, 0)
+    for state in states:
+        counts[state.status] += 1
+    return counts

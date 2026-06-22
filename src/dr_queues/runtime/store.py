@@ -15,18 +15,29 @@ from dr_queues.events.mongo import (
 from dr_queues.events.schema import PipelineEvent
 from dr_queues.manifest.manifest import RunManifest
 from dr_queues.runtime.models import (
+    JobAttempt,
+    JobAttemptAction,
+    JobState,
+    JobStateStatus,
     SeedBatch,
     SeedBatchStatus,
+    TargetHold,
     WorkerProcessRecord,
     WorkerStatus,
     utc_now_iso,
 )
+from dr_queues.targeting import TargetSelector, is_due, target_matches
 from dr_queues.workflow.definition import PipelineDefinition
 
 RUN_MANIFESTS_COLLECTION = "run_manifests"
 SEED_BATCHES_COLLECTION = "seed_batches"
 WORKER_PROCESSES_COLLECTION = "worker_processes"
+JOB_STATES_COLLECTION = "job_states"
+JOB_ATTEMPTS_COLLECTION = "job_attempts"
+TARGET_HOLDS_COLLECTION = "target_holds"
 STALE_HEARTBEAT_SECONDS = 30.0
+DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_RETRY_DELAY_SECONDS = 300.0
 
 
 class RunAlreadyExistsError(RuntimeError):
@@ -55,6 +66,9 @@ class MongoRunStore:
         manifests_collection_name: str = RUN_MANIFESTS_COLLECTION,
         seed_batches_collection_name: str = SEED_BATCHES_COLLECTION,
         workers_collection_name: str = WORKER_PROCESSES_COLLECTION,
+        job_states_collection_name: str = JOB_STATES_COLLECTION,
+        job_attempts_collection_name: str = JOB_ATTEMPTS_COLLECTION,
+        target_holds_collection_name: str = TARGET_HOLDS_COLLECTION,
     ) -> None:
         resolved_url = url or mongodb_url()
         self._owns_client = client is None
@@ -64,6 +78,9 @@ class MongoRunStore:
         self._manifests: Collection = database[manifests_collection_name]
         self._seed_batches: Collection = database[seed_batches_collection_name]
         self._workers: Collection = database[workers_collection_name]
+        self._job_states: Collection = database[job_states_collection_name]
+        self._job_attempts: Collection = database[job_attempts_collection_name]
+        self._target_holds: Collection = database[target_holds_collection_name]
         self._ensure_indexes()
 
     def _ensure_indexes(self) -> None:
@@ -80,6 +97,36 @@ class MongoRunStore:
         self._workers.create_index(
             [("run_id", ASCENDING), ("stage", ASCENDING)]
         )
+        self._job_states.create_index(
+            [
+                ("run_id", ASCENDING),
+                ("job_id", ASCENDING),
+                ("stage", ASCENDING),
+            ],
+            unique=True,
+        )
+        self._job_states.create_index(
+            [
+                ("run_id", ASCENDING),
+                ("stage", ASCENDING),
+                ("status", ASCENDING),
+            ],
+        )
+        self._job_states.create_index(
+            [
+                ("run_id", ASCENDING),
+                ("stage", ASCENDING),
+                ("partition_key", ASCENDING),
+            ],
+        )
+        self._job_attempts.create_index(
+            [
+                ("run_id", ASCENDING),
+                ("job_id", ASCENDING),
+                ("stage", ASCENDING),
+            ],
+        )
+        self._target_holds.create_index([("run_id", ASCENDING)])
 
     def create_run(
         self,
@@ -193,6 +240,326 @@ class MongoRunStore:
             },
         )
 
+    def mark_job_pending(
+        self,
+        *,
+        job: Any,
+        stage: str,
+        queue_name: str,
+    ) -> JobState:
+        return self._upsert_job_state(
+            job=job,
+            stage=stage,
+            status=JobStateStatus.PENDING,
+            queue_name=queue_name,
+            clear_fields=[
+                "not_before",
+                "held_until",
+                "hold_id",
+                "failure_detail",
+            ],
+        )
+
+    def mark_job_running(
+        self,
+        *,
+        job: Any,
+        stage: str,
+        queue_name: str,
+    ) -> JobState:
+        return self._upsert_job_state(
+            job=job,
+            stage=stage,
+            status=JobStateStatus.RUNNING,
+            queue_name=queue_name,
+            clear_fields=[
+                "not_before",
+                "held_until",
+                "hold_id",
+                "failure_detail",
+            ],
+        )
+
+    def mark_job_completed(
+        self,
+        *,
+        job: Any,
+        stage: str,
+        queue_name: str,
+    ) -> JobState:
+        return self._upsert_job_state(
+            job=job,
+            stage=stage,
+            status=JobStateStatus.COMPLETED,
+            queue_name=queue_name,
+            clear_fields=["not_before", "held_until", "hold_id"],
+        )
+
+    def mark_job_terminal(
+        self,
+        *,
+        job: Any,
+        stage: str,
+        queue_name: str,
+    ) -> JobState:
+        return self._upsert_job_state(
+            job=job,
+            stage=stage,
+            status=JobStateStatus.TERMINAL,
+            queue_name=queue_name,
+            clear_fields=["not_before", "held_until", "hold_id"],
+        )
+
+    def hold_job(
+        self,
+        *,
+        job: Any,
+        stage: str,
+        queue_name: str,
+        hold: TargetHold,
+    ) -> JobState:
+        return self._upsert_job_state(
+            job=job,
+            stage=stage,
+            status=JobStateStatus.HELD,
+            queue_name=queue_name,
+            extra_fields={
+                "held_until": hold.blocked_until,
+                "hold_id": hold.hold_id,
+            },
+            clear_fields=["not_before", "failure_detail"],
+        )
+
+    def record_job_failure(
+        self,
+        *,
+        job: Any,
+        stage: str,
+        queue_name: str,
+        error: Exception,
+        worker_id: str | None = None,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        retry_delay_seconds: float = DEFAULT_RETRY_DELAY_SECONDS,
+    ) -> JobAttempt:
+        attempt_number = (
+            self._job_attempts.count_documents(
+                {
+                    "run_id": job.run_id,
+                    "job_id": job.job_id,
+                    "stage": stage,
+                },
+            )
+            + 1
+        )
+        action = (
+            JobAttemptAction.DEAD_LETTERED
+            if attempt_number >= max_attempts
+            else JobAttemptAction.RETRY_WAITING
+        )
+        attempt = JobAttempt(
+            run_id=job.run_id,
+            job_id=job.job_id,
+            stage=stage,
+            partition_key=job.partition_key,
+            target_tags=job.target_tags,
+            attempt_number=attempt_number,
+            action=action,
+            error_type=type(error).__name__,
+            error_message=str(error),
+            worker_id=worker_id,
+        )
+        self._job_attempts.insert_one(attempt.model_dump())
+
+        status = (
+            JobStateStatus.DEAD_LETTERED
+            if action == JobAttemptAction.DEAD_LETTERED
+            else JobStateStatus.RETRY_WAITING
+        )
+        not_before = None
+        if status == JobStateStatus.RETRY_WAITING:
+            not_before_dt = datetime.now(tz=UTC) + timedelta(
+                seconds=retry_delay_seconds,
+            )
+            not_before = not_before_dt.isoformat()
+        self._upsert_job_state(
+            job=job,
+            stage=stage,
+            status=status,
+            queue_name=queue_name,
+            extra_fields={
+                "attempt_count": attempt_number,
+                "not_before": not_before,
+                "failure_detail": attempt.error_message,
+            },
+            clear_fields=["held_until", "hold_id"],
+        )
+        return attempt
+
+    def list_job_states(
+        self,
+        run_id: str,
+        *,
+        stage: str | None = None,
+        status: JobStateStatus | None = None,
+    ) -> list[JobState]:
+        query: dict[str, Any] = {"run_id": run_id}
+        if stage is not None:
+            query["stage"] = stage
+        if status is not None:
+            query["status"] = status
+        cursor = self._job_states.find(query).sort(
+            [("stage", ASCENDING), ("job_id", ASCENDING)]
+        )
+        return [JobState.model_validate(document) for document in cursor]
+
+    def list_job_attempts(
+        self,
+        run_id: str,
+        *,
+        job_id: str | None = None,
+    ) -> list[JobAttempt]:
+        query: dict[str, Any] = {"run_id": run_id}
+        if job_id is not None:
+            query["job_id"] = job_id
+        cursor = self._job_attempts.find(query).sort("created_at", ASCENDING)
+        return [JobAttempt.model_validate(document) for document in cursor]
+
+    def list_run_partitions(self, run_id: str) -> list[str]:
+        partitions = self._job_states.distinct(
+            "partition_key",
+            {"run_id": run_id},
+        )
+        return sorted(str(partition) for partition in partitions) or [
+            "default"
+        ]
+
+    def list_stage_partitions(
+        self,
+        *,
+        run_id: str,
+        stage: str,
+        include: list[TargetSelector] | None = None,
+        exclude: list[TargetSelector] | None = None,
+    ) -> list[str]:
+        stage_states = self.list_job_states(run_id, stage=stage)
+        run_states = self.list_job_states(run_id)
+        if not run_states:
+            return self.list_run_partitions(run_id)
+        states = (
+            run_states if include or exclude else stage_states or run_states
+        )
+        partitions = {
+            state.partition_key
+            for state in states
+            if target_matches(
+                state.target_tags,
+                include=include,
+                exclude=exclude,
+            )
+        }
+        return sorted(partitions)
+
+    def set_target_hold(
+        self,
+        *,
+        run_id: str,
+        selectors: list[TargetSelector],
+        blocked_until: str | None = None,
+        reason: str | None = None,
+    ) -> TargetHold:
+        hold = TargetHold(
+            run_id=run_id,
+            selectors=selectors,
+            blocked_until=blocked_until,
+            reason=reason,
+        )
+        self._target_holds.insert_one(hold.model_dump())
+        return hold
+
+    def clear_target_holds(
+        self,
+        *,
+        run_id: str,
+        selectors: list[TargetSelector],
+    ) -> int:
+        selector_documents = [selector.model_dump() for selector in selectors]
+        result = self._target_holds.update_many(
+            {
+                "run_id": run_id,
+                "selectors": selector_documents,
+                "cleared_at": None,
+            },
+            {"$set": {"cleared_at": utc_now_iso()}},
+        )
+        return result.modified_count
+
+    def list_target_holds(
+        self,
+        run_id: str,
+        *,
+        active_only: bool = True,
+    ) -> list[TargetHold]:
+        query: dict[str, Any] = {"run_id": run_id}
+        if active_only:
+            query["cleared_at"] = None
+        cursor = self._target_holds.find(query).sort("created_at", ASCENDING)
+        return [TargetHold.model_validate(document) for document in cursor]
+
+    def active_hold_for_tags(
+        self,
+        *,
+        run_id: str,
+        tags: dict[str, str],
+    ) -> TargetHold | None:
+        for hold in self.list_target_holds(run_id):
+            if hold.blocked_until is not None and is_due(hold.blocked_until):
+                continue
+            if target_matches(tags, include=hold.selectors):
+                return hold
+        return None
+
+    def replayable_job_states(
+        self,
+        run_id: str,
+        *,
+        job_id: str | None = None,
+        status: JobStateStatus | None = None,
+        include: list[TargetSelector] | None = None,
+        exclude: list[TargetSelector] | None = None,
+        force: bool = False,
+    ) -> list[JobState]:
+        if status is not None:
+            states = self.list_job_states(run_id, status=status)
+        else:
+            states = [
+                state
+                for replay_status in [
+                    JobStateStatus.RETRY_WAITING,
+                    JobStateStatus.HELD,
+                    JobStateStatus.FAILED,
+                    JobStateStatus.DEAD_LETTERED,
+                ]
+                for state in self.list_job_states(run_id, status=replay_status)
+            ]
+        replayable = []
+        for state in states:
+            if job_id is not None and state.job_id != job_id:
+                continue
+            if not target_matches(
+                state.target_tags,
+                include=include,
+                exclude=exclude,
+            ):
+                continue
+            if (
+                not force
+                and state.status == JobStateStatus.RETRY_WAITING
+                and not is_due(state.not_before)
+            ):
+                continue
+            replayable.append(state)
+        return replayable
+
     def register_worker(
         self,
         record: WorkerProcessRecord,
@@ -292,6 +659,51 @@ class MongoRunStore:
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
+
+    def _upsert_job_state(
+        self,
+        *,
+        job: Any,
+        stage: str,
+        status: JobStateStatus,
+        queue_name: str,
+        extra_fields: dict[str, Any] | None = None,
+        clear_fields: list[str] | None = None,
+    ) -> JobState:
+        existing = self._job_states.find_one(
+            {"run_id": job.run_id, "job_id": job.job_id, "stage": stage}
+        )
+        now = utc_now_iso()
+        set_fields: dict[str, Any] = {
+            "run_id": job.run_id,
+            "job_id": job.job_id,
+            "stage": stage,
+            "status": status,
+            "partition_key": job.partition_key,
+            "target_tags": job.target_tags,
+            "queue_name": queue_name,
+            "job": job.model_dump(),
+            "updated_at": now,
+        }
+        if existing is None:
+            set_fields["created_at"] = now
+        if extra_fields:
+            set_fields.update(extra_fields)
+        update: dict[str, Any] = {"$set": set_fields}
+        if clear_fields:
+            update["$unset"] = {field: "" for field in clear_fields}
+        self._job_states.update_one(
+            {"run_id": job.run_id, "job_id": job.job_id, "stage": stage},
+            update,
+            upsert=True,
+        )
+        document = self._job_states.find_one(
+            {"run_id": job.run_id, "job_id": job.job_id, "stage": stage}
+        )
+        if document is None:
+            msg = f"Job state for job {job.job_id!r} was not persisted."
+            raise RuntimeError(msg)
+        return JobState.model_validate(document)
 
 
 def validate_manifest(

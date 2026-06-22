@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 import time
 
-from dr_queues.amqp.connection import PikaDeliveryMode
+from dr_queues.amqp.connection import ChannelSession, PikaDeliveryMode
 from dr_queues.amqp.queues import build_stage_queues
 from dr_queues.cli import stage_worker_command_prefix
 from dr_queues.manifest.manifest import (
@@ -19,6 +19,7 @@ from dr_queues.runtime.store import (
     RunAlreadyExistsError,
     RunNotFoundError,
 )
+from dr_queues.targeting import TargetSelector
 from dr_queues.workflow.pipeline import Pipeline
 
 RUNNER_QUEUE_PREFIX = "run"
@@ -120,15 +121,39 @@ def _build_pools(
     pipeline: Pipeline,
     workers_by_stage: dict[str, int],
     run_store: MongoRunStore,
+    include_selectors: list[TargetSelector] | None = None,
+    exclude_selectors: list[TargetSelector] | None = None,
 ) -> list[WorkerPool]:
     pools: list[WorkerPool] = []
+    partitions = run_store.list_run_partitions(manifest.run_id)
     for stage in manifest.stages:
         workers = workers_by_stage.get(stage.name, stage.default_workers)
         handler = pipeline.make_handler(stage.step_index)
+        stage_partitions = [
+            partition
+            for partition in partitions
+            if partition
+            in run_store.list_stage_partitions(
+                run_id=manifest.run_id,
+                stage=stage.name,
+                include=include_selectors,
+                exclude=exclude_selectors,
+            )
+        ]
+        if not stage_partitions:
+            continue
+        input_queues = [
+            manifest.stage_input_queue(stage.name, partition)
+            for partition in stage_partitions
+        ]
         pools.append(
             WorkerPool(
-                input_queue=stage.input_queue,
+                input_queue=input_queues[0],
+                input_queues=input_queues,
                 output_queue=stage.output_queue,
+                output_queue_for_job=lambda job, stage_name=stage.name: (
+                    manifest.stage_output_queue(stage_name, job.partition_key)
+                ),
                 handler=handler,
                 event_sink=run_store,
                 workers=workers,
@@ -158,8 +183,13 @@ def run_in_process(
     owned_tap = tap is None
     if tap is None:
         final_stage = manifest.stages[-1]
+        partitions = store.list_run_partitions(manifest.run_id)
         tap = TerminalTap(
             completed_queue=final_stage.output_queue,
+            completed_queues=[
+                manifest.stage_output_queue(final_stage.name, partition)
+                for partition in partitions
+            ],
             run_id=manifest.run_id,
             expected_count=manifest.expected_jobs,
             run_store=store,
@@ -204,6 +234,8 @@ def spawn_stage_worker_process(
     stage: str,
     workers: int,
     handlers_module: str,
+    include_selectors: list[TargetSelector] | None = None,
+    exclude_selectors: list[TargetSelector] | None = None,
 ) -> subprocess.Popen[bytes]:
     cmd = [
         *stage_worker_command_prefix(),
@@ -216,6 +248,10 @@ def spawn_stage_worker_process(
         "--handlers-module",
         handlers_module,
     ]
+    for selector in include_selectors or []:
+        cmd.extend(["--include", f"{selector.key}={selector.value}"])
+    for selector in exclude_selectors or []:
+        cmd.extend(["--exclude", f"{selector.key}={selector.value}"])
     return subprocess.Popen(cmd)
 
 
@@ -243,6 +279,29 @@ def first_stage_input(manifest: RunManifest) -> str:
     return manifest.stages[0].input_queue
 
 
+def declare_partition_queues(
+    manifest: RunManifest,
+    partition_key: str,
+    *,
+    delivery_mode: PikaDeliveryMode = PikaDeliveryMode.PERSISTENT,
+) -> None:
+    session = ChannelSession.open_session(delivery_mode=delivery_mode)
+    try:
+        for stage in manifest.stages:
+            ChannelSession.declare_durable_queue(
+                queue_name=stage.input_queue_for_partition(partition_key),
+                channel=session.channel,
+                delivery_mode=delivery_mode,
+            )
+            ChannelSession.declare_durable_queue(
+                queue_name=stage.output_queue_for_partition(partition_key),
+                channel=session.channel,
+                delivery_mode=delivery_mode,
+            )
+    finally:
+        session.close()
+
+
 def seed_run(
     manifest: RunManifest,
     jobs: list[JobEnvelope],
@@ -258,11 +317,27 @@ def seed_run(
         force=force,
     )
     try:
-        seed_jobs(
-            queue_name=first_stage_input(manifest),
-            jobs=jobs,
-            delivery_mode=PikaDeliveryMode.PERSISTENT,
-        )
+        jobs_by_queue: dict[str, list[JobEnvelope]] = {}
+        first_stage = manifest.stages[0]
+        for job in jobs:
+            job.resolve_partition_key()
+            declare_partition_queues(manifest, job.partition_key)
+            queue_name = manifest.stage_input_queue(
+                first_stage.name,
+                job.partition_key,
+            )
+            store.mark_job_pending(
+                job=job,
+                stage=first_stage.name,
+                queue_name=queue_name,
+            )
+            jobs_by_queue.setdefault(queue_name, []).append(job)
+        for queue_name, queued_jobs in jobs_by_queue.items():
+            seed_jobs(
+                queue_name=queue_name,
+                jobs=queued_jobs,
+                delivery_mode=PikaDeliveryMode.PERSISTENT,
+            )
     except Exception as error:
         store.mark_seed_batch_failed(batch.batch_id, str(error))
         raise
