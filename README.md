@@ -47,7 +47,7 @@ dr-queues uses RabbitMQ and MongoDB for different jobs:
   depth. Jobs with target tags can be routed through partition-specific queues
   so workers can consume only matching target subsets.
 - **MongoDB** is the persistence and query layer. It owns run manifests,
-  seed-batch records, pipeline events, detached worker process records, latest
+  seed-batch records, pipeline events, worker records, latest
   per-job runtime state, failure attempt history, and target holds.
 
 There is no filesystem-backed runtime store. New runs should not create
@@ -118,7 +118,7 @@ On success you should see output like `events=70 terminals=10` for
 ### Inspect MongoDB runtime state
 
 Run manifests live in `run_manifests`, events in `pipeline_events`, seed
-batches in `seed_batches`, worker records in `worker_processes`, latest job
+batches in `seed_batches`, worker records in `workers`, latest job
 state in `job_states`, failure attempt history in `job_attempts`, and target
 holds in `target_holds`. Replace `YOUR_RUN_ID` with the `run_id` printed by the
 demo.
@@ -158,16 +158,52 @@ dr-queues-run status --run-id YOUR_RUN_ID
 dr-queues-run wait --run-id YOUR_RUN_ID --target terminal --timeout 120
 ```
 
-`status` combines Mongo progress records with RabbitMQ queue snapshots. Stage
-lines report active worker process records separately from total persisted
-records:
+`status` combines Mongo progress records with RabbitMQ queue snapshots. Expected
+job totals are derived from active seed batches, so adding more seed work to a
+run updates progress automatically. Stage lines report active worker records
+separately from active concurrency:
 
 ```text
-stage=transform completed=10/10 input_depth=0 output_depth=0 workers=1 records=3
+stage=transform completed=10/10 input_depth=0 output_depth=0 worker_records=1/3 worker_concurrency=5
 ```
 
 If counts are zero, check that MongoDB is running and that you used the actual
 `run_id` from demo output, not the placeholder text.
+
+### Local observability viewer
+
+Install the optional viewer dependencies and run the local read-only web UI:
+
+```bash
+uv add "dr-queues[viewer]"
+dr-queues-viewer --run-id YOUR_RUN_ID
+```
+
+The viewer binds to `127.0.0.1:8765` by default. It shows run summaries,
+stage queue depths, worker records, target holds, blocked jobs, recent failure
+attempts, and recent pipeline events without exposing worker controls or replay
+actions. The dashboard includes a local auto-refresh selector with off, 1s, 2s,
+5s, and 10s intervals.
+
+See [`docs/verification/dashboard_demos.md`](docs/verification/dashboard_demos.md)
+for dashboard demo scenarios covering in-process progress, detached workers,
+holds, and failure attempts.
+
+### Notebooks
+
+Two [marimo](https://marimo.io/) notebooks under `notebooks/` provide a
+learning surface and an ad-hoc analysis lens. Only their MongoDB reads and
+RabbitMQ queue snapshots execute; the define/run sections are illustrative.
+
+```bash
+uv run marimo edit notebooks/quickstart.py        # living intro: architecture + standard queries
+uv run marimo edit notebooks/run_exploration.py   # set a run_id, explore one run end to end
+```
+
+`quickstart.py` explains what dr-queues does and which collection answers which
+question. `run_exploration.py` is meant to be copied and tweaked: set a `run_id`
+and get state breakdowns, failure/retry analysis, a single-job timeline,
+per-stage timing, and live queue depths.
 
 ## Package layout
 
@@ -186,15 +222,16 @@ If counts are zero, check that MongoDB is running and that you used the actual
 Import from `dr_queues`:
 
 - **Setup / run:** `setup_run_queues`, `seed_run`, `run_in_process`
-- **Runtime:** `MongoRunStore`, `get_run_status`, `wait_for_run`, `WorkerPool`, `TerminalTap`, `JobEnvelope`
+- **Runtime:** `MongoRunStore`, `get_run_status`, `wait_for_run`, `WorkerPool`, `TerminalTap`, `JobEnvelope`, `WorkerRecord`, `WorkerRuntime`
 - **Failure controls:** `JobState`, `JobStateStatus`, `JobAttempt`, `JobAttemptAction`, `TargetHold`, `TargetSelector`
 - **Workflow:** `PipelineDefinition`, `HandlerRegistry`, `Pipeline`
 - **Events:** `PipelineEvent`, `filter_run_events`
 
 ## Detached stage workers
 
-Detached workers are controlled through Mongo worker records plus OS process
-signals on the local host. Start a single stage in a separate process:
+In-process and detached workers both create Mongo worker records. Detached
+workers are also controlled through OS process signals on the local host. Start
+a single stage in a separate process:
 
 ```bash
 dr-queues-stage-worker \
@@ -298,7 +335,7 @@ provider throttling yet.
 
 See [`docs/manual_runtime_testing.md`](docs/manual_runtime_testing.md) for the
 manual operational test log covering detached startup, scale up/down,
-kill/restart recovery, duplicate seed protection, filesystem persistence
+kill/restart recovery, duplicate job protection, filesystem persistence
 checks, target-scoped workers, holds, retries, dead letters, and replay.
 See [`docs/design/failure_persistence.md`](docs/design/failure_persistence.md)
 for the current failure persistence design.

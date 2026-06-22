@@ -60,7 +60,6 @@ class RunStageManifest(BaseModel):
 class RunManifest(BaseModel):
     run_id: str
     pipeline_definition: PipelineDefinition
-    expected_jobs: int
     queue_prefix: str
     stages: list[RunStageManifest]
 

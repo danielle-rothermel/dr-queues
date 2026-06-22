@@ -80,6 +80,7 @@ def build_run_status(
     workers = run_store.list_workers(manifest.run_id)
     job_states = run_store.list_job_states(manifest.run_id)
     partitions = run_store.list_run_partitions(manifest.run_id)
+    expected_jobs = run_store.expected_job_count(manifest.run_id)
     stages: list[StageRunStatus] = []
     for stage in manifest.stages:
         started = progress.stage_started.get(stage.name, set())
@@ -93,7 +94,7 @@ def build_run_status(
         stages.append(
             StageRunStatus(
                 stage=stage.name,
-                expected_jobs=manifest.expected_jobs,
+                expected_jobs=expected_jobs,
                 started_jobs=len(started),
                 completed_jobs=len(completed),
                 in_flight_jobs=max(0, len(started) - len(completed)),
@@ -118,7 +119,7 @@ def build_run_status(
     return RunStatus(
         run_id=manifest.run_id,
         manifest=manifest,
-        expected_jobs=manifest.expected_jobs,
+        expected_jobs=expected_jobs,
         terminal_jobs=len(progress.terminal_jobs),
         stages=stages,
         workers=workers,
@@ -158,7 +159,6 @@ def wait_for_run(
                         for partition in partitions
                     ],
                     run_id=run_id,
-                    expected_count=status.expected_jobs,
                     run_store=store,
                 )
                 tap.start()

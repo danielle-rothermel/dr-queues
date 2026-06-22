@@ -34,6 +34,14 @@ Issues = "https://github.com/danielle-rothermel/dr-queues/issues"
 dr-queues-demo = "dr_queues.cli.demo:run"
 dr-queues-run = "dr_queues.cli.run:run"
 dr-queues-stage-worker = "dr_queues.cli.stage_worker:run"
+dr-queues-viewer = "dr_queues.viewer.cli:run"
+
+[project.optional-dependencies]
+viewer = [
+    "fastapi>=0.115.0",
+    "httpx>=0.28.0",
+    "uvicorn[standard]>=0.34.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -44,10 +52,13 @@ packages = ["src/dr_queues"]
 
 [dependency-groups]
 dev = [
+    "fastapi>=0.115.0",
+    "httpx>=0.28.0",
     "marimo[recommended]>=0.23.10",
     "pytest>=9.1.1",
     "ruff>=0.15.18",
     "ty>=0.0.51",
+    "uvicorn[standard]>=0.34.0",
 ]
 
 [tool.pytest.ini_options]

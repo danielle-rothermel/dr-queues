@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from pymongo import ASCENDING, MongoClient
+from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
@@ -19,10 +19,11 @@ from dr_queues.runtime.models import (
     JobAttemptAction,
     JobState,
     JobStateStatus,
+    RunRecord,
     SeedBatch,
     SeedBatchStatus,
     TargetHold,
-    WorkerProcessRecord,
+    WorkerRecord,
     WorkerStatus,
     utc_now_iso,
 )
@@ -31,7 +32,7 @@ from dr_queues.workflow.definition import PipelineDefinition
 
 RUN_MANIFESTS_COLLECTION = "run_manifests"
 SEED_BATCHES_COLLECTION = "seed_batches"
-WORKER_PROCESSES_COLLECTION = "worker_processes"
+WORKERS_COLLECTION = "workers"
 JOB_STATES_COLLECTION = "job_states"
 JOB_ATTEMPTS_COLLECTION = "job_attempts"
 TARGET_HOLDS_COLLECTION = "target_holds"
@@ -48,7 +49,11 @@ class RunNotFoundError(RuntimeError):
     pass
 
 
-class DuplicateSeedError(RuntimeError):
+class DuplicateJobError(RuntimeError):
+    pass
+
+
+class InvalidSeedJobError(RuntimeError):
     pass
 
 
@@ -65,7 +70,7 @@ class MongoRunStore:
         events_collection_name: str = DEFAULT_COLLECTION,
         manifests_collection_name: str = RUN_MANIFESTS_COLLECTION,
         seed_batches_collection_name: str = SEED_BATCHES_COLLECTION,
-        workers_collection_name: str = WORKER_PROCESSES_COLLECTION,
+        workers_collection_name: str = WORKERS_COLLECTION,
         job_states_collection_name: str = JOB_STATES_COLLECTION,
         job_attempts_collection_name: str = JOB_ATTEMPTS_COLLECTION,
         target_holds_collection_name: str = TARGET_HOLDS_COLLECTION,
@@ -157,24 +162,48 @@ class MongoRunStore:
         return manifest
 
     def get_manifest(self, run_id: str) -> RunManifest:
+        return self.get_run_record(run_id).manifest
+
+    def get_run_record(self, run_id: str) -> RunRecord:
         document = self._manifests.find_one({"run_id": run_id})
         if document is None:
             msg = f"Run {run_id!r} does not exist."
             raise RunNotFoundError(msg)
-        return RunManifest.model_validate(document["manifest"])
+        return RunRecord(
+            run_id=document["run_id"],
+            manifest=RunManifest.model_validate(document["manifest"]),
+            created_at=document["created_at"],
+            updated_at=document["updated_at"],
+            metadata=document.get("metadata", {}),
+        )
+
+    def list_runs(self, *, limit: int = 50) -> list[RunRecord]:
+        cursor = (
+            self._manifests.find({})
+            .sort("created_at", DESCENDING)
+            .limit(limit)
+        )
+        return [
+            RunRecord(
+                run_id=document["run_id"],
+                manifest=RunManifest.model_validate(document["manifest"]),
+                created_at=document["created_at"],
+                updated_at=document["updated_at"],
+                metadata=document.get("metadata", {}),
+            )
+            for document in cursor
+        ]
 
     def attach_run(
         self,
         *,
         run_id: str,
         pipeline_definition: PipelineDefinition,
-        expected_jobs: int | None = None,
     ) -> RunManifest:
         manifest = self.get_manifest(run_id)
         validate_manifest(
             manifest=manifest,
             pipeline_definition=pipeline_definition,
-            expected_jobs=expected_jobs,
         )
         return manifest
 
@@ -191,31 +220,67 @@ class MongoRunStore:
         )
         return [PipelineEvent.model_validate(document) for document in cursor]
 
+    def list_recent_events(
+        self,
+        run_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[PipelineEvent]:
+        cursor = (
+            self._events.find({"run_id": run_id})
+            .sort("timestamp", DESCENDING)
+            .limit(limit)
+        )
+        return [PipelineEvent.model_validate(document) for document in cursor]
+
     def create_seed_batch(
         self,
         *,
         run_id: str,
         job_ids: list[str],
-        force: bool = False,
     ) -> SeedBatch:
-        if not force:
-            existing = self._seed_batches.find_one(
-                {
-                    "run_id": run_id,
-                    "status": {
-                        "$in": [
-                            SeedBatchStatus.CREATED,
-                            SeedBatchStatus.PUBLISHED,
-                        ]
-                    },
-                },
+        duplicate_ids = _duplicate_values(job_ids)
+        if duplicate_ids:
+            msg = (
+                f"Seed batch for run {run_id!r} contains duplicate job IDs: "
+                f"{', '.join(duplicate_ids)}."
             )
-            if existing is not None:
-                msg = f"Run {run_id!r} already has a seed batch."
-                raise DuplicateSeedError(msg)
+            raise DuplicateJobError(msg)
+        existing_job_ids = self._active_seed_job_ids(run_id)
+        conflicting_job_ids = sorted(existing_job_ids.intersection(job_ids))
+        if conflicting_job_ids:
+            msg = (
+                f"Run {run_id!r} already has seeded job IDs: "
+                f"{', '.join(conflicting_job_ids)}."
+            )
+            raise DuplicateJobError(msg)
         batch = SeedBatch(run_id=run_id, job_ids=job_ids, count=len(job_ids))
         self._seed_batches.insert_one(batch.model_dump())
         return batch
+
+    def list_seed_batches(
+        self,
+        run_id: str,
+        *,
+        statuses: set[SeedBatchStatus] | None = None,
+    ) -> list[SeedBatch]:
+        query: dict[str, Any] = {"run_id": run_id}
+        if statuses is not None:
+            query["status"] = {"$in": list(statuses)}
+        cursor = self._seed_batches.find(query).sort("created_at", ASCENDING)
+        return [SeedBatch.model_validate(document) for document in cursor]
+
+    def expected_job_count(self, run_id: str) -> int:
+        return sum(
+            batch.count
+            for batch in self.list_seed_batches(
+                run_id,
+                statuses={
+                    SeedBatchStatus.CREATED,
+                    SeedBatchStatus.PUBLISHED,
+                },
+            )
+        )
 
     def mark_seed_batch_published(self, batch_id: str) -> None:
         self._seed_batches.update_one(
@@ -401,15 +466,21 @@ class MongoRunStore:
         *,
         stage: str | None = None,
         status: JobStateStatus | None = None,
+        partition_key: str | None = None,
+        limit: int | None = None,
     ) -> list[JobState]:
         query: dict[str, Any] = {"run_id": run_id}
         if stage is not None:
             query["stage"] = stage
         if status is not None:
             query["status"] = status
+        if partition_key is not None:
+            query["partition_key"] = partition_key
         cursor = self._job_states.find(query).sort(
             [("stage", ASCENDING), ("job_id", ASCENDING)]
         )
+        if limit is not None:
+            cursor = cursor.limit(limit)
         return [JobState.model_validate(document) for document in cursor]
 
     def list_job_attempts(
@@ -417,11 +488,15 @@ class MongoRunStore:
         run_id: str,
         *,
         job_id: str | None = None,
+        limit: int | None = None,
     ) -> list[JobAttempt]:
         query: dict[str, Any] = {"run_id": run_id}
         if job_id is not None:
             query["job_id"] = job_id
-        cursor = self._job_attempts.find(query).sort("created_at", ASCENDING)
+        direction = DESCENDING if limit is not None else ASCENDING
+        cursor = self._job_attempts.find(query).sort("created_at", direction)
+        if limit is not None:
+            cursor = cursor.limit(limit)
         return [JobAttempt.model_validate(document) for document in cursor]
 
     def list_run_partitions(self, run_id: str) -> list[str]:
@@ -562,23 +637,23 @@ class MongoRunStore:
 
     def register_worker(
         self,
-        record: WorkerProcessRecord,
-    ) -> WorkerProcessRecord:
+        record: WorkerRecord,
+    ) -> WorkerRecord:
         self._workers.insert_one(record.model_dump())
         return record
 
-    def heartbeat_worker(self, worker_id: str) -> WorkerProcessRecord | None:
+    def heartbeat_worker(self, worker_id: str) -> WorkerRecord | None:
         self._workers.update_one(
             {"worker_id": worker_id, "status": WorkerStatus.RUNNING},
             {"$set": {"last_heartbeat_at": utc_now_iso()}},
         )
         return self.get_worker(worker_id)
 
-    def get_worker(self, worker_id: str) -> WorkerProcessRecord | None:
+    def get_worker(self, worker_id: str) -> WorkerRecord | None:
         document = self._workers.find_one({"worker_id": worker_id})
         if document is None:
             return None
-        return WorkerProcessRecord.model_validate(document)
+        return WorkerRecord.model_validate(document)
 
     def list_workers(
         self,
@@ -586,7 +661,7 @@ class MongoRunStore:
         *,
         stage: str | None = None,
         include_stopped: bool = True,
-    ) -> list[WorkerProcessRecord]:
+    ) -> list[WorkerRecord]:
         self.mark_stale_workers(run_id)
         query: dict[str, Any] = {"run_id": run_id}
         if stage is not None:
@@ -594,9 +669,7 @@ class MongoRunStore:
         if not include_stopped:
             query["status"] = {"$ne": WorkerStatus.STOPPED}
         cursor = self._workers.find(query).sort("started_at", ASCENDING)
-        return [
-            WorkerProcessRecord.model_validate(document) for document in cursor
-        ]
+        return [WorkerRecord.model_validate(document) for document in cursor]
 
     def request_worker_stop(
         self,
@@ -604,7 +677,7 @@ class MongoRunStore:
         run_id: str,
         worker_id: str | None = None,
         stage: str | None = None,
-    ) -> list[WorkerProcessRecord]:
+    ) -> list[WorkerRecord]:
         query: dict[str, Any] = {
             "run_id": run_id,
             "status": WorkerStatus.RUNNING,
@@ -614,7 +687,7 @@ class MongoRunStore:
         if stage is not None:
             query["stage"] = stage
         records = [
-            WorkerProcessRecord.model_validate(document)
+            WorkerRecord.model_validate(document)
             for document in self._workers.find(query)
         ]
         now = utc_now_iso()
@@ -705,12 +778,23 @@ class MongoRunStore:
             raise RuntimeError(msg)
         return JobState.model_validate(document)
 
+    def _active_seed_job_ids(self, run_id: str) -> set[str]:
+        job_ids: set[str] = set()
+        for batch in self.list_seed_batches(
+            run_id,
+            statuses={
+                SeedBatchStatus.CREATED,
+                SeedBatchStatus.PUBLISHED,
+            },
+        ):
+            job_ids.update(batch.job_ids)
+        return job_ids
+
 
 def validate_manifest(
     *,
     manifest: RunManifest,
     pipeline_definition: PipelineDefinition,
-    expected_jobs: int | None = None,
 ) -> None:
     if manifest.pipeline_definition != pipeline_definition:
         msg = (
@@ -718,9 +802,13 @@ def validate_manifest(
             f"{manifest.pipeline_definition.id!r}, not {pipeline_definition.id!r}."
         )
         raise ManifestMismatchError(msg)
-    if expected_jobs is not None and manifest.expected_jobs != expected_jobs:
-        msg = (
-            f"Run {manifest.run_id!r} expected_jobs mismatch: "
-            f"{manifest.expected_jobs} != {expected_jobs}."
-        )
-        raise ManifestMismatchError(msg)
+
+
+def _duplicate_values(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for value in values:
+        if value in seen:
+            duplicates.add(value)
+        seen.add(value)
+    return sorted(duplicates)

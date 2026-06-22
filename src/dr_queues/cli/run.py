@@ -44,7 +44,6 @@ ACTIVE_WORKER_STATUSES = {
 def init(
     run_id: str = typer.Option(..., "--run-id"),
     definition_json: Path = typer.Option(..., "--definition-json"),
-    expected_jobs: int = typer.Option(..., "--expected-jobs"),
     workers: str = typer.Option("", "--workers"),
     overwrite: bool = typer.Option(False, "--overwrite"),
 ) -> None:
@@ -61,7 +60,6 @@ def init(
         pipeline=pipeline,
         run_id=run_id,
         workers_by_stage=workers_by_stage,
-        expected_jobs=expected_jobs,
         overwrite=overwrite,
     )
     typer.echo(manifest.model_dump_json())
@@ -71,7 +69,6 @@ def init(
 def seed(
     run_id: str = typer.Option(..., "--run-id"),
     jobs_jsonl: Path = typer.Option(..., "--jobs-jsonl"),
-    force: bool = typer.Option(False, "--force"),
 ) -> None:
     store = MongoRunStore()
     try:
@@ -81,7 +78,7 @@ def seed(
             for line in jobs_jsonl.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
-        seed_run(manifest, jobs, run_store=store, force=force)
+        seed_run(manifest, jobs, run_store=store)
         typer.echo(f"seeded={len(jobs)} run_id={run_id}")
     finally:
         store.close()
@@ -118,7 +115,9 @@ def status(
             f"stage={stage.stage} completed={stage.completed_jobs}/"
             f"{stage.expected_jobs} input_depth={stage.input_queue.ready_messages} "
             f"output_depth={stage.output_queue.ready_messages} "
-            f"workers={len(active_workers)} records={len(stage.workers)}",
+            f"worker_records={len(active_workers)}/{len(stage.workers)} "
+            f"worker_concurrency="
+            f"{sum(worker.concurrency for worker in active_workers)}",
         )
 
 
@@ -222,7 +221,7 @@ def workers(
         typer.echo(
             f"worker_id={record.worker_id} stage={record.stage} "
             f"status={record.status} pid={record.pid} host={record.host} "
-            f"workers={record.workers}",
+            f"runtime={record.runtime} concurrency={record.concurrency}",
         )
 
 

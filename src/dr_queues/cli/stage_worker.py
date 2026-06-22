@@ -1,23 +1,20 @@
 from __future__ import annotations
 
 import importlib
-import os
 import signal
 import time
-from threading import Event, Thread
 
 import typer
 
 from dr_queues.pipeline.workers import WorkerPool
-from dr_queues.runtime.lifecycle import current_host
-from dr_queues.runtime.models import WorkerProcessRecord, WorkerStatus
+from dr_queues.runtime.lifecycle import WorkerHeartbeat, register_worker
+from dr_queues.runtime.models import WorkerRuntime
 from dr_queues.runtime.store import MongoRunStore
 from dr_queues.targeting import parse_selectors
 from dr_queues.workflow.pipeline import Pipeline
 from dr_queues.workflow.registry import HandlerRegistry
 
 app = typer.Typer(add_completion=False)
-HEARTBEAT_INTERVAL_SECONDS = 2.0
 
 
 def _load_registry(module_path: str) -> HandlerRegistry:
@@ -70,17 +67,15 @@ def main(
         for partition in partitions
     ]
 
-    record = run_store.register_worker(
-        WorkerProcessRecord(
-            run_id=run_id,
-            stage=stage,
-            pid=os.getpid(),
-            host=current_host(),
-            workers=workers,
-            handlers_module=handlers_module,
-            include_selectors=include_selectors,
-            exclude_selectors=exclude_selectors,
-        ),
+    record = register_worker(
+        run_store=run_store,
+        run_id=run_id,
+        stage=stage,
+        concurrency=workers,
+        runtime=WorkerRuntime.DETACHED,
+        handlers_module=handlers_module,
+        include_selectors=include_selectors,
+        exclude_selectors=exclude_selectors,
     )
     pool = WorkerPool(
         input_queue=input_queues[0],
@@ -100,12 +95,10 @@ def main(
         f"worker_id={record.worker_id} stage={stage} "
         f"workers={workers} inputs={','.join(input_queues)}",
     )
-    heartbeat_stop = Event()
-    heartbeat = Thread(
-        target=_heartbeat_loop,
-        args=(run_store, record.worker_id, pool, heartbeat_stop),
-        daemon=True,
-        name=f"heartbeat-{record.worker_id}",
+    heartbeat = WorkerHeartbeat(
+        run_store=run_store,
+        worker_id=record.worker_id,
+        stop_worker=pool.stop,
     )
     heartbeat.start()
 
@@ -121,24 +114,11 @@ def main(
         while not pool.is_stopped:
             time.sleep(0.5)
     finally:
-        heartbeat_stop.set()
+        heartbeat.stop()
         pool.stop()
         pool.join(timeout=5)
         run_store.mark_worker_stopped(record.worker_id)
         run_store.close()
-
-
-def _heartbeat_loop(
-    run_store: MongoRunStore,
-    worker_id: str,
-    pool: WorkerPool,
-    stop: Event,
-) -> None:
-    while not stop.wait(HEARTBEAT_INTERVAL_SECONDS):
-        record = run_store.heartbeat_worker(worker_id)
-        if record is not None and record.status == WorkerStatus.STOP_REQUESTED:
-            pool.stop()
-            return
 
 
 def run() -> None:

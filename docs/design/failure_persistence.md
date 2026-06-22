@@ -45,7 +45,7 @@ MongoDB stores the original runtime collections:
 - `run_manifests`
 - `pipeline_events`
 - `seed_batches`
-- `worker_processes`
+- `workers`
 
 It also stores operational failure/control state:
 

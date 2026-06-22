@@ -79,7 +79,6 @@ def main(
         pipeline=pipeline,
         run_id=resolved_run_id,
         workers_by_stage=workers_by_stage,
-        expected_jobs=expected,
         run_store=run_store,
     )
     jobs = pipeline.make_seed_jobs(run_id=resolved_run_id, repeats=repeats)
@@ -94,6 +93,7 @@ def main(
         workers_by_stage=workers_by_stage,
         run_store=run_store,
         completion_timeout=completion_timeout,
+        handlers_module=handlers_module,
     )
 
     events = filter_run_events(

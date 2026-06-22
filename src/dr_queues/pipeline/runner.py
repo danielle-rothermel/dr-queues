@@ -13,8 +13,11 @@ from dr_queues.manifest.manifest import (
 from dr_queues.pipeline.job import JobEnvelope, seed_jobs
 from dr_queues.pipeline.tap import TerminalTap
 from dr_queues.pipeline.workers import WorkerPool
+from dr_queues.runtime.lifecycle import WorkerHeartbeat, register_worker
+from dr_queues.runtime.models import SeedBatch, WorkerRecord, WorkerRuntime
 from dr_queues.runtime.status import wait_for_run
 from dr_queues.runtime.store import (
+    InvalidSeedJobError,
     MongoRunStore,
     RunAlreadyExistsError,
     RunNotFoundError,
@@ -30,7 +33,6 @@ def setup_run_queues(
     pipeline: Pipeline,
     run_id: str,
     workers_by_stage: dict[str, int],
-    expected_jobs: int,
     delivery_mode: PikaDeliveryMode = PikaDeliveryMode.PERSISTENT,
     queue_prefix: str | None = None,
     run_store: MongoRunStore | None = None,
@@ -85,7 +87,6 @@ def setup_run_queues(
         manifest = RunManifest(
             run_id=run_id,
             pipeline_definition=pipeline.definition,
-            expected_jobs=expected_jobs,
             queue_prefix=prefix,
             stages=stages,
         )
@@ -99,7 +100,6 @@ def attach_run_queues(
     *,
     run_id: str,
     pipeline: Pipeline,
-    expected_jobs: int | None = None,
     run_store: MongoRunStore | None = None,
 ) -> RunManifest:
     store = run_store or MongoRunStore()
@@ -108,7 +108,6 @@ def attach_run_queues(
         return store.attach_run(
             run_id=run_id,
             pipeline_definition=pipeline.definition,
-            expected_jobs=expected_jobs,
         )
     finally:
         if close_store:
@@ -123,8 +122,9 @@ def _build_pools(
     run_store: MongoRunStore,
     include_selectors: list[TargetSelector] | None = None,
     exclude_selectors: list[TargetSelector] | None = None,
-) -> list[WorkerPool]:
-    pools: list[WorkerPool] = []
+    handlers_module: str = "in-process",
+) -> list[tuple[WorkerPool, WorkerRecord]]:
+    pools: list[tuple[WorkerPool, WorkerRecord]] = []
     partitions = run_store.list_run_partitions(manifest.run_id)
     for stage in manifest.stages:
         workers = workers_by_stage.get(stage.name, stage.default_workers)
@@ -146,20 +146,30 @@ def _build_pools(
             manifest.stage_input_queue(stage.name, partition)
             for partition in stage_partitions
         ]
-        pools.append(
-            WorkerPool(
-                input_queue=input_queues[0],
-                input_queues=input_queues,
-                output_queue=stage.output_queue,
-                output_queue_for_job=lambda job, stage_name=stage.name: (
-                    manifest.stage_output_queue(stage_name, job.partition_key)
-                ),
-                handler=handler,
-                event_sink=run_store,
-                workers=workers,
-                stage_name=stage.name,
-            ),
+        record = register_worker(
+            run_store=run_store,
+            run_id=manifest.run_id,
+            stage=stage.name,
+            concurrency=workers,
+            runtime=WorkerRuntime.IN_PROCESS,
+            handlers_module=handlers_module,
+            include_selectors=include_selectors,
+            exclude_selectors=exclude_selectors,
         )
+        pool = WorkerPool(
+            input_queue=input_queues[0],
+            input_queues=input_queues,
+            output_queue=stage.output_queue,
+            output_queue_for_job=lambda job, stage_name=stage.name: (
+                manifest.stage_output_queue(stage_name, job.partition_key)
+            ),
+            handler=handler,
+            event_sink=run_store,
+            workers=workers,
+            stage_name=stage.name,
+            worker_id=record.worker_id,
+        )
+        pools.append((pool, record))
     return pools
 
 
@@ -171,6 +181,7 @@ def run_in_process(
     run_store: MongoRunStore | None = None,
     completion_timeout: float,
     tap: TerminalTap | None = None,
+    handlers_module: str = "in-process",
 ) -> None:
     store = run_store or MongoRunStore()
     close_store = run_store is None
@@ -179,7 +190,16 @@ def run_in_process(
         pipeline=pipeline,
         workers_by_stage=workers_by_stage,
         run_store=store,
+        handlers_module=handlers_module,
     )
+    heartbeats = [
+        WorkerHeartbeat(
+            run_store=store,
+            worker_id=record.worker_id,
+            stop_worker=pool.stop,
+        )
+        for pool, record in pools
+    ]
     owned_tap = tap is None
     if tap is None:
         final_stage = manifest.stages[-1]
@@ -191,12 +211,13 @@ def run_in_process(
                 for partition in partitions
             ],
             run_id=manifest.run_id,
-            expected_count=manifest.expected_jobs,
             run_store=store,
         )
 
     try:
-        for pool in reversed(pools):
+        for heartbeat in heartbeats:
+            heartbeat.start()
+        for pool, _record in reversed(pools):
             pool.start()
         if owned_tap:
             tap.start()
@@ -213,13 +234,16 @@ def run_in_process(
             msg = "Timed out waiting for persisted pipeline completion."
             raise TimeoutError(msg)
     finally:
-        for pool in pools:
+        for pool, _record in pools:
             pool.stop()
         if owned_tap:
             tap.stop()
 
-        for pool in pools:
+        for heartbeat in heartbeats:
+            heartbeat.stop()
+        for pool, record in pools:
             pool.join(timeout=5)
+            store.mark_worker_stopped(record.worker_id)
         if owned_tap:
             tap.join(timeout=5)
 
@@ -307,16 +331,16 @@ def seed_run(
     jobs: list[JobEnvelope],
     *,
     run_store: MongoRunStore | None = None,
-    force: bool = False,
 ) -> None:
     store = run_store or MongoRunStore()
     close_store = run_store is None
-    batch = store.create_seed_batch(
-        run_id=manifest.run_id,
-        job_ids=[job.job_id for job in jobs],
-        force=force,
-    )
+    batch: SeedBatch | None = None
     try:
+        _validate_seed_jobs(manifest, jobs)
+        batch = store.create_seed_batch(
+            run_id=manifest.run_id,
+            job_ids=[job.job_id for job in jobs],
+        )
         jobs_by_queue: dict[str, list[JobEnvelope]] = {}
         first_stage = manifest.stages[0]
         for job in jobs:
@@ -339,10 +363,39 @@ def seed_run(
                 delivery_mode=PikaDeliveryMode.PERSISTENT,
             )
     except Exception as error:
-        store.mark_seed_batch_failed(batch.batch_id, str(error))
+        if batch is not None:
+            store.mark_seed_batch_failed(batch.batch_id, str(error))
         raise
     else:
         store.mark_seed_batch_published(batch.batch_id)
     finally:
         if close_store:
             store.close()
+
+
+def _validate_seed_jobs(
+    manifest: RunManifest,
+    jobs: list[JobEnvelope],
+) -> None:
+    mismatched_run_ids = sorted(
+        {job.run_id for job in jobs if job.run_id != manifest.run_id}
+    )
+    if mismatched_run_ids:
+        msg = (
+            f"Seed jobs for run {manifest.run_id!r} include other run IDs: "
+            f"{', '.join(mismatched_run_ids)}."
+        )
+        raise InvalidSeedJobError(msg)
+    mismatched_pipeline_ids = sorted(
+        {
+            job.pipeline_id
+            for job in jobs
+            if job.pipeline_id != manifest.pipeline_id
+        }
+    )
+    if mismatched_pipeline_ids:
+        msg = (
+            f"Seed jobs for pipeline {manifest.pipeline_id!r} include other "
+            f"pipeline IDs: {', '.join(mismatched_pipeline_ids)}."
+        )
+        raise InvalidSeedJobError(msg)

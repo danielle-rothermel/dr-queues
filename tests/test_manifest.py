@@ -29,7 +29,6 @@ def test_manifest_roundtrip_json() -> None:
     manifest = RunManifest(
         run_id="run-abc",
         pipeline_definition=definition,
-        expected_jobs=2,
         queue_prefix="run.run-abc",
         stages=[
             RunStageManifest(
@@ -61,7 +60,6 @@ def test_manifest_resolves_partition_queues_across_stages() -> None:
     manifest = RunManifest(
         run_id="run-abc",
         pipeline_definition=definition,
-        expected_jobs=1,
         queue_prefix="run.run-abc",
         stages=[
             RunStageManifest(

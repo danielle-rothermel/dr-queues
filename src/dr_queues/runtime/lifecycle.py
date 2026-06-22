@@ -6,14 +6,17 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from threading import Event, Thread
 
 from dr_queues.cli import stage_worker_command_prefix
-from dr_queues.runtime.models import WorkerProcessRecord, WorkerStatus
+from dr_queues.runtime.models import WorkerRecord, WorkerRuntime, WorkerStatus
 from dr_queues.runtime.store import MongoRunStore
 from dr_queues.targeting import TargetSelector
 
 DEFAULT_STOP_SIGNAL = signal.SIGTERM
 WORKER_STARTUP_GRACE_SECONDS = 0.5
+HEARTBEAT_INTERVAL_SECONDS = 2.0
 
 
 class WorkerStartError(RuntimeError):
@@ -22,6 +25,70 @@ class WorkerStartError(RuntimeError):
 
 def current_host() -> str:
     return socket.gethostname()
+
+
+def register_worker(
+    *,
+    run_store: MongoRunStore,
+    run_id: str,
+    stage: str,
+    concurrency: int,
+    runtime: WorkerRuntime,
+    handlers_module: str,
+    command: list[str] | None = None,
+    include_selectors: list[TargetSelector] | None = None,
+    exclude_selectors: list[TargetSelector] | None = None,
+) -> WorkerRecord:
+    return run_store.register_worker(
+        WorkerRecord(
+            run_id=run_id,
+            stage=stage,
+            pid=os.getpid(),
+            host=current_host(),
+            concurrency=concurrency,
+            runtime=runtime,
+            handlers_module=handlers_module,
+            command=command or [],
+            include_selectors=include_selectors or [],
+            exclude_selectors=exclude_selectors or [],
+        ),
+    )
+
+
+class WorkerHeartbeat:
+    def __init__(
+        self,
+        *,
+        run_store: MongoRunStore,
+        worker_id: str,
+        stop_worker: Callable[[], None],
+    ) -> None:
+        self.run_store = run_store
+        self.worker_id = worker_id
+        self.stop_worker = stop_worker
+        self._stop = Event()
+        self._thread = Thread(
+            target=self._run,
+            daemon=True,
+            name=f"heartbeat-{worker_id}",
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=HEARTBEAT_INTERVAL_SECONDS)
+
+    def _run(self) -> None:
+        while not self._stop.wait(HEARTBEAT_INTERVAL_SECONDS):
+            record = self.run_store.heartbeat_worker(self.worker_id)
+            if (
+                record is not None
+                and record.status == WorkerStatus.STOP_REQUESTED
+            ):
+                self.stop_worker()
+                return
 
 
 def start_stage_workers(
@@ -100,7 +167,7 @@ def list_workers(
     *,
     stage: str | None = None,
     run_store: MongoRunStore | None = None,
-) -> list[WorkerProcessRecord]:
+) -> list[WorkerRecord]:
     store = run_store or MongoRunStore()
     close_store = run_store is None
     try:
@@ -116,7 +183,7 @@ def stop_workers(
     worker_id: str | None = None,
     stage: str | None = None,
     run_store: MongoRunStore | None = None,
-) -> list[WorkerProcessRecord]:
+) -> list[WorkerRecord]:
     store = run_store or MongoRunStore()
     close_store = run_store is None
     try:
@@ -134,7 +201,7 @@ def stop_workers(
             store.close()
 
 
-def _signal_worker(record: WorkerProcessRecord) -> None:
+def _signal_worker(record: WorkerRecord) -> None:
     if record.status == WorkerStatus.STOPPED:
         return
     try:
