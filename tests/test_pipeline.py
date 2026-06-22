@@ -1,7 +1,6 @@
 import pytest
 
-from dr_queues.analysis.filter import filter_run_events
-from dr_queues.events.schema import EventKind
+from dr_queues.events.schema import EventKind, filter_run_events
 from dr_queues.manifest.manifest import parse_workers_arg
 from dr_queues.pipeline.runner import (
     run_in_process,

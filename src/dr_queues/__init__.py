@@ -2,7 +2,6 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 
-from dr_queues.analysis.filter import filter_run_events
 from dr_queues.events import (
     AmqpEventSink,
     CompositeEventSink,
@@ -11,6 +10,7 @@ from dr_queues.events import (
     MemoryEventSink,
     MongoEventSink,
     PipelineEvent,
+    filter_run_events,
 )
 from dr_queues.manifest import (
     RunManifest,

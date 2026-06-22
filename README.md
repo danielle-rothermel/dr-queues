@@ -153,10 +153,9 @@ If counts are zero, check:
 |--------|------|
 | `amqp/` | Connection helpers, stage queue pairs |
 | `pipeline/` | `JobEnvelope`, `WorkerPool`, `TerminalTap`, runner |
-| `events/` | `PipelineEvent`, `EventSink`, Mongo/AMQP/memory sinks |
+| `events/` | `PipelineEvent`, `EventSink`, Mongo/AMQP/memory sinks, event filters |
 | `manifest/` | Run manifest read/write, worker CLI helpers |
 | `workflow/` | `PipelineDefinition`, `HandlerRegistry`, `Pipeline` |
-| `analysis/` | `filter_run_events` |
 
 ## Public API
 
@@ -165,8 +164,7 @@ Import from `dr_queues`:
 - **Setup / run:** `setup_run_queues`, `run_in_process`, `seed_jobs`, `seed_manifest_jobs`
 - **Runtime:** `WorkerPool`, `TerminalTap`, `JobEnvelope`
 - **Workflow:** `PipelineDefinition`, `HandlerRegistry`, `Pipeline`
-- **Events:** `PipelineEvent`, `EventSink`, `MongoEventSink`, `AmqpEventSink`, `MemoryEventSink`
-- **Analysis:** `filter_run_events`
+- **Events:** `PipelineEvent`, `EventSink`, `MongoEventSink`, `AmqpEventSink`, `MemoryEventSink`, `filter_run_events`
 
 ## Detached stage workers
 

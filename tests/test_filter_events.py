@@ -1,5 +1,4 @@
-from dr_queues.analysis.filter import filter_run_events
-from dr_queues.events.schema import EventKind, PipelineEvent
+from dr_queues.events.schema import EventKind, PipelineEvent, filter_run_events
 
 
 def test_filter_run_events() -> None:
