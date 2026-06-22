@@ -184,6 +184,22 @@ attempts, and recent pipeline events without exposing worker controls or replay
 actions. The dashboard includes a local auto-refresh selector with off, 1s, 2s,
 5s, and 10s intervals.
 
+### Notebooks
+
+Two [marimo](https://marimo.io/) notebooks under `notebooks/` provide a
+learning surface and an ad-hoc analysis lens. Only their MongoDB reads and
+RabbitMQ queue snapshots execute; the define/run sections are illustrative.
+
+```bash
+uv run marimo edit notebooks/quickstart.py        # living intro: architecture + standard queries
+uv run marimo edit notebooks/run_exploration.py   # set a run_id, explore one run end to end
+```
+
+`quickstart.py` explains what dr-queues does and which collection answers which
+question. `run_exploration.py` is meant to be copied and tweaked: set a `run_id`
+and get state breakdowns, failure/retry analysis, a single-job timeline,
+per-stage timing, and live queue depths.
+
 ## Package layout
 
 | Module | Role |
