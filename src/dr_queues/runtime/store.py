@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from pymongo import ASCENDING, DESCENDING, MongoClient
+from pymongo import ASCENDING, DESCENDING, MongoClient, UpdateOne
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
@@ -12,7 +12,7 @@ from dr_queues.events.mongo import (
     _database_name,
     mongodb_url,
 )
-from dr_queues.events.schema import PipelineEvent
+from dr_queues.events.schema import EventKind, PipelineEvent
 from dr_queues.manifest.manifest import RunManifest
 from dr_queues.runtime.models import (
     JobAttempt,
@@ -374,6 +374,60 @@ class MongoRunStore:
             queue_name=queue_name,
             clear_fields=["not_before", "held_until", "hold_id"],
         )
+
+    def record_terminal_batch(
+        self,
+        *,
+        jobs: list[tuple[Any, str]],
+        stage: str,
+    ) -> None:
+        if not jobs:
+            return
+        now = utc_now_iso()
+        operations = []
+        for job, queue_name in jobs:
+            operations.append(
+                UpdateOne(
+                    {
+                        "run_id": job.run_id,
+                        "job_id": job.job_id,
+                        "stage": stage,
+                    },
+                    {
+                        "$set": {
+                            "run_id": job.run_id,
+                            "job_id": job.job_id,
+                            "stage": stage,
+                            "status": JobStateStatus.TERMINAL,
+                            "partition_key": job.partition_key,
+                            "target_tags": job.target_tags,
+                            "queue_name": queue_name,
+                            "job": job.model_dump(),
+                            "updated_at": now,
+                        },
+                        "$setOnInsert": {"created_at": now},
+                        "$unset": {
+                            "not_before": "",
+                            "held_until": "",
+                            "hold_id": "",
+                        },
+                    },
+                    upsert=True,
+                )
+            )
+        self._job_states.bulk_write(operations, ordered=True)
+        events = [
+            PipelineEvent(
+                run_id=job.run_id,
+                job_id=job.job_id,
+                lane=job.lane,
+                stage=stage,
+                event=EventKind.TERMINAL,
+                payload=job.model_dump(),
+            ).model_dump()
+            for job, _queue_name in jobs
+        ]
+        self._events.insert_many(events, ordered=True)
 
     def hold_job(
         self,

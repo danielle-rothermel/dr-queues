@@ -226,6 +226,37 @@ def test_mongo_run_store_records_retry_and_dead_letter_attempts(
 
 
 @pytest.mark.integration
+def test_mongo_run_store_records_terminal_batch(
+    mongo_run_store: MongoRunStore,
+) -> None:
+    jobs = [
+        JobEnvelope(
+            run_id="run-1",
+            job_id=f"job-{index}",
+            lane="lane-a",
+            repeat=index,
+            pipeline_id="demo",
+        )
+        for index in range(2)
+    ]
+
+    mongo_run_store.record_terminal_batch(
+        jobs=[(job, "terminal.queue") for job in jobs],
+        stage="terminal",
+    )
+
+    events = mongo_run_store.read_by_run_id("run-1")
+    states = mongo_run_store.list_job_states("run-1", stage="terminal")
+
+    assert [event.event for event in events] == [
+        EventKind.TERMINAL,
+        EventKind.TERMINAL,
+    ]
+    assert {state.job_id for state in states} == {"job-0", "job-1"}
+    assert {state.status for state in states} == {JobStateStatus.TERMINAL}
+
+
+@pytest.mark.integration
 def test_mongo_run_store_filters_job_states_and_recent_attempts(
     mongo_run_store: MongoRunStore,
 ) -> None:

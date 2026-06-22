@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import dr_queues.pipeline.tap as tap_mod
 from dr_queues.events.schema import EventKind, PipelineEvent
 from dr_queues.pipeline.job import JobEnvelope
 from dr_queues.pipeline.tap import TerminalTap
@@ -140,12 +141,18 @@ class RecordingSink:
 
 
 class TerminalRecordingStore(RecordingSink):
+    def __init__(self, *, expected_jobs: int = 1) -> None:
+        super().__init__()
+        self.expected_jobs = expected_jobs
+        self.read_calls = 0
+
     def read_by_run_id(self, run_id: str) -> list[PipelineEvent]:
+        self.read_calls += 1
         return [event for event in self.events if event.run_id == run_id]
 
     def expected_job_count(self, run_id: str) -> int:
         assert run_id == "run-1"
-        return 1
+        return self.expected_jobs
 
 
 class PlainEventSink:
@@ -162,10 +169,10 @@ class PlainEventSink:
         return None
 
 
-def _job() -> JobEnvelope:
+def _job(job_id: str = "job-1") -> JobEnvelope:
     return JobEnvelope(
         run_id="run-1",
-        job_id="job-1",
+        job_id=job_id,
         lane="lane-a",
         repeat=0,
         pipeline_id="demo",
@@ -233,6 +240,7 @@ def test_terminal_tap_records_terminal_through_stage_execution() -> None:
         completed_queue="run.r.s3.completed",
         run_id="run-1",
         run_store=store,
+        batch_size=1,
     )
     channel = FakeChannel()
 
@@ -249,3 +257,77 @@ def test_terminal_tap_records_terminal_through_stage_execution() -> None:
         }
     ]
     assert tap.wait_for_completion(timeout=0)
+
+
+def test_terminal_tap_tracks_completion_without_rereading_events() -> None:
+    store = TerminalRecordingStore(expected_jobs=3)
+    tap = TerminalTap(
+        completed_queue="run.r.s3.completed",
+        run_id="run-1",
+        run_store=store,
+        batch_size=3,
+    )
+    channel = FakeChannel()
+
+    tap._on_message(
+        channel, FakeTerminalMethod(), None, _job("job-1").to_json()
+    )
+    tap._on_message(
+        channel, FakeTerminalMethod(), None, _job("job-2").to_json()
+    )
+
+    assert store.read_calls == 1
+    assert not tap.wait_for_completion(timeout=0)
+
+    tap._on_message(
+        channel, FakeTerminalMethod(), None, _job("job-3").to_json()
+    )
+
+    assert store.read_calls == 1
+    assert tap.wait_for_completion(timeout=0)
+
+
+def test_terminal_tap_prefetches_batch_size(monkeypatch) -> None:
+    class _Channel:
+        is_open = True
+
+        def __init__(self) -> None:
+            self.prefetch_count: int | None = None
+
+        def basic_qos(self, *, prefetch_count: int) -> None:
+            self.prefetch_count = prefetch_count
+
+        def basic_consume(self, **_kwargs) -> None:
+            return None
+
+        def close(self) -> None:
+            self.is_open = False
+
+    class _Connection:
+        is_open = True
+
+        def __init__(self) -> None:
+            self.channel_instance = _Channel()
+
+        def channel(self) -> _Channel:
+            return self.channel_instance
+
+        def process_data_events(self, *, time_limit: float) -> None:
+            del time_limit
+
+        def close(self) -> None:
+            self.is_open = False
+
+    connection = _Connection()
+    monkeypatch.setattr(tap_mod, "open_connection", lambda: connection)
+    store = TerminalRecordingStore(expected_jobs=0)
+    tap = TerminalTap(
+        completed_queue="run.r.s3.completed",
+        run_id="run-1",
+        run_store=store,
+        batch_size=37,
+    )
+
+    tap._run()
+
+    assert connection.channel_instance.prefetch_count == 37

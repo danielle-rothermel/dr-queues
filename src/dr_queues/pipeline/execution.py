@@ -332,6 +332,18 @@ class StageExecution:
             queue_name=queue_name,
         )
 
+    def record_terminal_batch(
+        self,
+        *,
+        jobs: list[tuple[JobEnvelope, str]],
+    ) -> None:
+        batch_recorder = getattr(self.store, "record_terminal_batch", None)
+        if callable(batch_recorder):
+            batch_recorder(jobs=jobs, stage=self.stage_name)
+            return
+        for job, queue_name in jobs:
+            self.record_terminal(job=job, queue_name=queue_name)
+
 
 def _log(stage: str, event: str, job: JobEnvelope) -> None:
     timestamp = datetime.now(tz=UTC).isoformat()
