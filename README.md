@@ -169,6 +169,20 @@ stage=transform completed=10/10 input_depth=0 output_depth=0 workers=1 records=3
 If counts are zero, check that MongoDB is running and that you used the actual
 `run_id` from demo output, not the placeholder text.
 
+### Local observability viewer
+
+Install the optional viewer dependencies and run the local read-only web UI:
+
+```bash
+uv add "dr-queues[viewer]"
+dr-queues-viewer --run-id YOUR_RUN_ID
+```
+
+The viewer binds to `127.0.0.1:8765` by default. It shows run summaries,
+stage queue depths, worker records, target holds, blocked jobs, recent failure
+attempts, and recent pipeline events without exposing worker controls or replay
+actions.
+
 ## Package layout
 
 | Module | Role |

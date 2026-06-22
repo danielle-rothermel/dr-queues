@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dr-queues viewer</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">local runtime</p>
+        <h1>dr-queues viewer</h1>
+      </div>
+      <div class="run-control">
+        <label for="run-id-input">Run ID</label>
+        <div class="run-input-row">
+          <input id="run-id-input" autocomplete="off" spellcheck="false" />
+          <button id="load-run-button" type="button">Load</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="shell">
+      <aside class="sidebar">
+        <div class="panel-header">
+          <h2>Runs</h2>
+          <button id="refresh-runs-button" type="button">Refresh</button>
+        </div>
+        <div id="run-list" class="run-list"></div>
+      </aside>
+
+      <section class="workspace">
+        <div id="message" class="message" hidden></div>
+        <section id="overview" class="overview"></section>
+        <section id="stage-rail" class="stage-rail"></section>
+
+        <section class="grid">
+          <article class="panel span-2">
+            <div class="panel-header">
+              <h2>Blocked jobs</h2>
+              <span id="blocked-count" class="metric-pill"></span>
+            </div>
+            <div id="blocked-jobs" class="table-wrap"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <h2>Workers</h2>
+              <span id="worker-count" class="metric-pill"></span>
+            </div>
+            <div id="workers" class="table-wrap"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <h2>Holds</h2>
+              <span id="hold-count" class="metric-pill"></span>
+            </div>
+            <div id="holds" class="table-wrap"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <h2>Attempts</h2>
+              <span id="attempt-count" class="metric-pill"></span>
+            </div>
+            <div id="attempts" class="table-wrap"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <h2>Events</h2>
+              <span id="event-count" class="metric-pill"></span>
+            </div>
+            <div id="events" class="event-feed"></div>
+          </article>
+        </section>
+      </section>
+    </main>
+
+    <script src="/assets/app.js" type="module"></script>
+  </body>
+</html>

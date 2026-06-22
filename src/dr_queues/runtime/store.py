@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from pymongo import ASCENDING, MongoClient
+from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
@@ -19,6 +19,7 @@ from dr_queues.runtime.models import (
     JobAttemptAction,
     JobState,
     JobStateStatus,
+    RunRecord,
     SeedBatch,
     SeedBatchStatus,
     TargetHold,
@@ -157,11 +158,37 @@ class MongoRunStore:
         return manifest
 
     def get_manifest(self, run_id: str) -> RunManifest:
+        return self.get_run_record(run_id).manifest
+
+    def get_run_record(self, run_id: str) -> RunRecord:
         document = self._manifests.find_one({"run_id": run_id})
         if document is None:
             msg = f"Run {run_id!r} does not exist."
             raise RunNotFoundError(msg)
-        return RunManifest.model_validate(document["manifest"])
+        return RunRecord(
+            run_id=document["run_id"],
+            manifest=RunManifest.model_validate(document["manifest"]),
+            created_at=document["created_at"],
+            updated_at=document["updated_at"],
+            metadata=document.get("metadata", {}),
+        )
+
+    def list_runs(self, *, limit: int = 50) -> list[RunRecord]:
+        cursor = (
+            self._manifests.find({})
+            .sort("created_at", DESCENDING)
+            .limit(limit)
+        )
+        return [
+            RunRecord(
+                run_id=document["run_id"],
+                manifest=RunManifest.model_validate(document["manifest"]),
+                created_at=document["created_at"],
+                updated_at=document["updated_at"],
+                metadata=document.get("metadata", {}),
+            )
+            for document in cursor
+        ]
 
     def attach_run(
         self,
@@ -188,6 +215,19 @@ class MongoRunStore:
         cursor = self._events.find({"run_id": run_id}).sort(
             "timestamp",
             ASCENDING,
+        )
+        return [PipelineEvent.model_validate(document) for document in cursor]
+
+    def list_recent_events(
+        self,
+        run_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[PipelineEvent]:
+        cursor = (
+            self._events.find({"run_id": run_id})
+            .sort("timestamp", DESCENDING)
+            .limit(limit)
         )
         return [PipelineEvent.model_validate(document) for document in cursor]
 
@@ -401,15 +441,21 @@ class MongoRunStore:
         *,
         stage: str | None = None,
         status: JobStateStatus | None = None,
+        partition_key: str | None = None,
+        limit: int | None = None,
     ) -> list[JobState]:
         query: dict[str, Any] = {"run_id": run_id}
         if stage is not None:
             query["stage"] = stage
         if status is not None:
             query["status"] = status
+        if partition_key is not None:
+            query["partition_key"] = partition_key
         cursor = self._job_states.find(query).sort(
             [("stage", ASCENDING), ("job_id", ASCENDING)]
         )
+        if limit is not None:
+            cursor = cursor.limit(limit)
         return [JobState.model_validate(document) for document in cursor]
 
     def list_job_attempts(
@@ -417,11 +463,15 @@ class MongoRunStore:
         run_id: str,
         *,
         job_id: str | None = None,
+        limit: int | None = None,
     ) -> list[JobAttempt]:
         query: dict[str, Any] = {"run_id": run_id}
         if job_id is not None:
             query["job_id"] = job_id
-        cursor = self._job_attempts.find(query).sort("created_at", ASCENDING)
+        direction = DESCENDING if limit is not None else ASCENDING
+        cursor = self._job_attempts.find(query).sort("created_at", direction)
+        if limit is not None:
+            cursor = cursor.limit(limit)
         return [JobAttempt.model_validate(document) for document in cursor]
 
     def list_run_partitions(self, run_id: str) -> list[str]:

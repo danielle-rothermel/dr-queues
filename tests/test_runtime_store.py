@@ -95,6 +95,25 @@ def test_mongo_run_store_refuses_duplicate_run(
 
 
 @pytest.mark.integration
+def test_mongo_run_store_lists_run_records(
+    mongo_run_store: MongoRunStore,
+) -> None:
+    first = _manifest("run-1")
+    second = _manifest("run-2")
+    mongo_run_store.create_run(first, metadata={"owner": "alpha"})
+    mongo_run_store.create_run(second, metadata={"owner": "bravo"})
+
+    records = mongo_run_store.list_runs(limit=10)
+
+    assert {record.run_id for record in records} == {"run-1", "run-2"}
+    assert records[0].manifest.pipeline_id == "demo"
+    assert {record.metadata["owner"] for record in records} == {
+        "alpha",
+        "bravo",
+    }
+
+
+@pytest.mark.integration
 def test_mongo_run_store_refuses_duplicate_seed_batch(
     mongo_run_store: MongoRunStore,
 ) -> None:
@@ -168,6 +187,64 @@ def test_mongo_run_store_records_retry_and_dead_letter_attempts(
     assert states[0].status == JobStateStatus.DEAD_LETTERED
     assert states[0].attempt_count == 2
     assert states[0].partition_key == "gemini-flash"
+
+
+@pytest.mark.integration
+def test_mongo_run_store_filters_job_states_and_recent_attempts(
+    mongo_run_store: MongoRunStore,
+) -> None:
+    gemini = JobEnvelope(
+        run_id="run-1",
+        job_id="job-gemini",
+        lane="lane-a",
+        repeat=0,
+        pipeline_id="demo",
+        target_tags={"quota_pool": "gemini-flash"},
+    )
+    openai = JobEnvelope(
+        run_id="run-1",
+        job_id="job-openai",
+        lane="lane-a",
+        repeat=0,
+        pipeline_id="demo",
+        target_tags={"quota_pool": "openai-nano"},
+    )
+    for job in [gemini, openai]:
+        job.resolve_partition_key()
+        mongo_run_store.mark_job_pending(
+            job=job,
+            stage="parse",
+            queue_name=f"queue.{job.partition_key}",
+        )
+    mongo_run_store.record_job_failure(
+        job=gemini,
+        stage="parse",
+        queue_name="queue.gemini-flash",
+        error=RuntimeError("first"),
+        max_attempts=2,
+    )
+    second = mongo_run_store.record_job_failure(
+        job=gemini,
+        stage="parse",
+        queue_name="queue.gemini-flash",
+        error=RuntimeError("second"),
+        max_attempts=2,
+    )
+
+    gemini_states = mongo_run_store.list_job_states(
+        "run-1",
+        partition_key="gemini-flash",
+    )
+    pending_states = mongo_run_store.list_job_states(
+        "run-1",
+        status=JobStateStatus.PENDING,
+        limit=1,
+    )
+    recent_attempts = mongo_run_store.list_job_attempts("run-1", limit=1)
+
+    assert [state.job_id for state in gemini_states] == ["job-gemini"]
+    assert len(pending_states) == 1
+    assert recent_attempts == [second]
 
 
 @pytest.mark.integration

@@ -49,6 +49,16 @@ class JobAttemptAction(StrEnum):
     DEAD_LETTERED = "dead_lettered"
 
 
+class RunHealth(StrEnum):
+    CREATED = "created"
+    RUNNING = "running"
+    COMPLETE = "complete"
+    RETRY_WAITING = "retry_waiting"
+    HELD = "held"
+    STALE_WORKERS = "stale_workers"
+    DEAD_LETTERED = "dead_lettered"
+
+
 class SeedBatch(BaseModel):
     batch_id: str = Field(default_factory=lambda: str(uuid4()))
     run_id: str
@@ -160,6 +170,41 @@ class RunStatus(BaseModel):
     @property
     def is_complete(self) -> bool:
         return self.terminal_jobs >= self.expected_jobs
+
+
+class RunRecord(BaseModel):
+    run_id: str
+    manifest: RunManifest
+    created_at: str
+    updated_at: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunSummary(BaseModel):
+    run_id: str
+    pipeline_id: str
+    created_at: str
+    updated_at: str
+    expected_jobs: int
+    terminal_jobs: int
+    stage_names: list[str]
+    partitions: list[str]
+    job_state_counts: dict[JobStateStatus, int] = Field(default_factory=dict)
+    active_workers: int
+    stale_workers: int
+    health: RunHealth
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunObservation(BaseModel):
+    run_id: str
+    summary: RunSummary
+    status: RunStatus
+    partitions: list[str]
+    active_holds: list[TargetHold] = Field(default_factory=list)
+    blocked_jobs: list[JobState] = Field(default_factory=list)
+    recent_attempts: list[JobAttempt] = Field(default_factory=list)
+    recent_events: list[PipelineEvent] = Field(default_factory=list)
 
 
 class EventProgress(BaseModel):
