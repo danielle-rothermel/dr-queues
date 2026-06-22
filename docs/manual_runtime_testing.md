@@ -743,3 +743,176 @@ What happened:
 Actions taken:
 
 - None.
+
+## Stage Eligibility Seed And Replay Retest
+
+Completion criteria for this pass:
+
+- Seeded jobs are marked pending and published through the shared stage
+  eligibility path.
+- Held work can be replayed to the same stage partition where it was blocked.
+- Retry-waiting work respects `not_before` unless replay is forced.
+- Dead-lettered work can be replayed after the handler is fixed.
+- All manual workers are stopped, no `.runs/<run_id>` paths are created, and
+  fresh manual run records are cleaned up.
+
+### Environment Note
+
+What tested:
+
+- Tried to start local dependencies with `docker compose up -d`.
+- Verified RabbitMQ and MongoDB connectivity through the default local URLs.
+
+Why:
+
+- Verify this pass used the real RabbitMQ transport and Mongo runtime store
+  that stage eligibility depends on.
+
+What happened:
+
+- The repo Mongo container was already running on port 27017.
+- RabbitMQ port 5672 was already allocated by another local service, so the
+  repo RabbitMQ container could not bind that port.
+- The existing localhost RabbitMQ service accepted connections, and Mongo ping
+  succeeded.
+
+Actions taken:
+
+- Reused the reachable localhost RabbitMQ service and repo MongoDB for this
+  manual pass.
+
+### Seed Eligibility Path
+
+What tested:
+
+- Created `manual-20260622-stage-eligibility-seed-6efa7b` with two tagged
+  jobs: one `quota_pool=gemini-flash` and one `quota_pool=openai-nano`.
+- Ran `dr-queues-run init`, then `dr-queues-run seed`.
+- Checked status, Mongo seed batches, Mongo job states, and `.runs` before
+  starting workers.
+- Started one detached worker per stage, waited for terminal completion, and
+  stopped the workers.
+
+Why:
+
+- Verify `seed_run` still creates a published seed batch, declares partition
+  queues, marks first-stage jobs pending, and publishes them after delegating
+  to the shared stage eligibility path.
+
+What happened:
+
+- `seed` reported `seeded=2`.
+- The seed batch was stored with `status=published`.
+- `status` reported `terminals=0/2`, `pending=2`, and first-stage
+  `input_depth=2` before workers started.
+- Mongo job states showed both jobs as `status=pending` at `stage=slow` with
+  partition queues for `gemini-flash` and `openai-nano`.
+- No `.runs/manual-20260622-stage-eligibility-seed-6efa7b` path existed.
+- After workers started, `wait --target terminal` returned `terminals=2/2`.
+- After `stop`, all three detached worker records ended as `status=stopped`.
+
+Actions taken:
+
+- None.
+
+### Held Replay To Same Stage Partition
+
+What tested:
+
+- Created `manual-20260622-stage-eligibility-hold-6efa7b` with one
+  `quota_pool=gemini-flash` job.
+- Started only the `slow` worker, waited until the job reached the `transform`
+  input queue, then set a hold on `quota_pool=gemini-flash`.
+- Started a `transform` worker so the job was persisted as held.
+- Tested a zero-match replay selector, then cleared the hold, replayed the
+  held job, restarted downstream workers, and waited for terminal completion.
+
+Why:
+
+- Verify replay uses the persisted job state's stage and partition, not the
+  initial seed stage, when returning held work to RabbitMQ.
+
+What happened:
+
+- Before the hold, `status` showed `slow completed=1/1` and transform
+  `input_depth=1`.
+- While held, `failures` listed `hold-gemini-1` as `stage=transform`,
+  `status=held`, `partition=gemini-flash`, and `attempts=0`.
+- Terminal wait intentionally exited nonzero with `terminals=0/1`.
+- `replay --status held --selector quota_pool=openai-nano --force` returned
+  `replayed=0` and state stayed `completed=1 held=1`.
+- After clearing the hold and replaying `quota_pool=gemini-flash`, replay
+  returned `replayed=1`.
+- With workers stopped, `status` showed the job as `pending` at `transform`,
+  and Mongo stored queue
+  `run.manual-20260622-stage-eligibility-hold-6efa7b.s1.completed.partition.gemini-flash`.
+- After restarting `transform` and `finalize`, `wait --target terminal`
+  returned `terminals=1/1`.
+- All detached worker records for the run ended as `status=stopped`.
+
+Actions taken:
+
+- None.
+
+### Retry, Dead Letter, And Recovery Replay
+
+What tested:
+
+- Created `manual-20260622-stage-eligibility-failure-6efa7b` with one
+  `quota_pool=openai-nano` job.
+- Started a successful `slow` worker and an intentionally failing `transform`
+  worker from a temporary handler module.
+- Checked unforced retry replay, forced replay through retry exhaustion,
+  dead-letter replay after switching to a successful handler, and final
+  terminal completion.
+
+Why:
+
+- Verify replay selection respects retry timing unless forced, persists repeated
+  failure attempts, can move work to `dead_lettered`, and can recover that work
+  after a handler fix.
+
+What happened:
+
+- After the first failure, `failures` showed `status=retry_waiting`,
+  `attempts=1`, and `detail=manual rate limit`.
+- `status` showed `completed=1 retry_waiting=1` with zero queue depth, showing
+  the failed delivery was acknowledged after persistence.
+- Unforced `replay --status retry_waiting` returned `replayed=0`.
+- Two forced replays returned `replayed=1` each.
+- `attempts` showed attempt 1 and 2 as `retry_waiting`, and attempt 3 as
+  `dead_lettered`.
+- `failures` showed the latest job state as `dead_lettered` with `attempts=3`.
+- After stopping the failing worker, starting successful `transform` and
+  `finalize` workers, and replaying `dead_lettered` work, terminal wait
+  returned `terminals=1/1`.
+- Historical failed attempts remained visible after recovery.
+- All detached worker records for the run ended as `status=stopped`.
+
+Actions taken:
+
+- None.
+
+### Post-Test Cleanup
+
+What tested:
+
+- Deleted RabbitMQ queues and Mongo records for the three fresh manual run IDs.
+- Checked that no `.runs` paths were created for the manual runs.
+
+Why:
+
+- Leave the local development environment clean while preserving the written
+  evidence from the manual pass.
+
+What happened:
+
+- Deleted 12 queues for the seed run, 8 queues for the hold run, and 8 queues
+  for the failure run.
+- Deleted 3 manifests, 3 seed batches, 11 worker records, 16 job states,
+  3 job attempts, 1 target hold, and 31 pipeline events from Mongo.
+- No `.runs` paths existed for the fresh manual run IDs.
+
+Actions taken:
+
+- None.
