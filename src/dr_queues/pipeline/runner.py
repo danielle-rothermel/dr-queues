@@ -3,21 +3,24 @@ from __future__ import annotations
 import subprocess
 import time
 
-from dr_queues.amqp.connection import ChannelSession, PikaDeliveryMode
+from dr_queues.amqp.connection import PikaDeliveryMode
 from dr_queues.amqp.queues import build_stage_queues
 from dr_queues.cli import stage_worker_command_prefix
 from dr_queues.manifest.manifest import (
     RunManifest,
     RunStageManifest,
 )
-from dr_queues.pipeline.job import JobEnvelope, seed_jobs
+from dr_queues.pipeline.eligibility import (
+    declare_partition_queues,
+    seed_stage_eligible_jobs,
+)
+from dr_queues.pipeline.job import JobEnvelope
 from dr_queues.pipeline.tap import TerminalTap
 from dr_queues.pipeline.workers import WorkerPool
 from dr_queues.runtime.lifecycle import WorkerHeartbeat, register_worker
-from dr_queues.runtime.models import SeedBatch, WorkerRecord, WorkerRuntime
+from dr_queues.runtime.models import WorkerRecord, WorkerRuntime
 from dr_queues.runtime.status import wait_for_run
 from dr_queues.runtime.store import (
-    InvalidSeedJobError,
     MongoRunStore,
     RunAlreadyExistsError,
     RunNotFoundError,
@@ -303,29 +306,6 @@ def first_stage_input(manifest: RunManifest) -> str:
     return manifest.stages[0].input_queue
 
 
-def declare_partition_queues(
-    manifest: RunManifest,
-    partition_key: str,
-    *,
-    delivery_mode: PikaDeliveryMode = PikaDeliveryMode.PERSISTENT,
-) -> None:
-    session = ChannelSession.open_session(delivery_mode=delivery_mode)
-    try:
-        for stage in manifest.stages:
-            ChannelSession.declare_durable_queue(
-                queue_name=stage.input_queue_for_partition(partition_key),
-                channel=session.channel,
-                delivery_mode=delivery_mode,
-            )
-            ChannelSession.declare_durable_queue(
-                queue_name=stage.output_queue_for_partition(partition_key),
-                channel=session.channel,
-                delivery_mode=delivery_mode,
-            )
-    finally:
-        session.close()
-
-
 def seed_run(
     manifest: RunManifest,
     jobs: list[JobEnvelope],
@@ -334,68 +314,8 @@ def seed_run(
 ) -> None:
     store = run_store or MongoRunStore()
     close_store = run_store is None
-    batch: SeedBatch | None = None
     try:
-        _validate_seed_jobs(manifest, jobs)
-        batch = store.create_seed_batch(
-            run_id=manifest.run_id,
-            job_ids=[job.job_id for job in jobs],
-        )
-        jobs_by_queue: dict[str, list[JobEnvelope]] = {}
-        first_stage = manifest.stages[0]
-        for job in jobs:
-            job.resolve_partition_key()
-            declare_partition_queues(manifest, job.partition_key)
-            queue_name = manifest.stage_input_queue(
-                first_stage.name,
-                job.partition_key,
-            )
-            store.mark_job_pending(
-                job=job,
-                stage=first_stage.name,
-                queue_name=queue_name,
-            )
-            jobs_by_queue.setdefault(queue_name, []).append(job)
-        for queue_name, queued_jobs in jobs_by_queue.items():
-            seed_jobs(
-                queue_name=queue_name,
-                jobs=queued_jobs,
-                delivery_mode=PikaDeliveryMode.PERSISTENT,
-            )
-    except Exception as error:
-        if batch is not None:
-            store.mark_seed_batch_failed(batch.batch_id, str(error))
-        raise
-    else:
-        store.mark_seed_batch_published(batch.batch_id)
+        seed_stage_eligible_jobs(manifest, jobs, run_store=store)
     finally:
         if close_store:
             store.close()
-
-
-def _validate_seed_jobs(
-    manifest: RunManifest,
-    jobs: list[JobEnvelope],
-) -> None:
-    mismatched_run_ids = sorted(
-        {job.run_id for job in jobs if job.run_id != manifest.run_id}
-    )
-    if mismatched_run_ids:
-        msg = (
-            f"Seed jobs for run {manifest.run_id!r} include other run IDs: "
-            f"{', '.join(mismatched_run_ids)}."
-        )
-        raise InvalidSeedJobError(msg)
-    mismatched_pipeline_ids = sorted(
-        {
-            job.pipeline_id
-            for job in jobs
-            if job.pipeline_id != manifest.pipeline_id
-        }
-    )
-    if mismatched_pipeline_ids:
-        msg = (
-            f"Seed jobs for pipeline {manifest.pipeline_id!r} include other "
-            f"pipeline IDs: {', '.join(mismatched_pipeline_ids)}."
-        )
-        raise InvalidSeedJobError(msg)

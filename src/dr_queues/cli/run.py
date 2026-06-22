@@ -5,9 +5,9 @@ from pathlib import Path
 import typer
 
 from dr_queues.manifest import parse_workers_arg
-from dr_queues.pipeline.job import JobEnvelope, seed_jobs
+from dr_queues.pipeline.eligibility import replay_stage_eligible_jobs
+from dr_queues.pipeline.job import JobEnvelope
 from dr_queues.pipeline.runner import (
-    declare_partition_queues,
     seed_run,
     setup_run_queues,
 )
@@ -357,30 +357,15 @@ def replay(
     store = MongoRunStore()
     try:
         manifest = store.get_manifest(run_id)
-        states = store.replayable_job_states(
-            run_id,
+        replayed = replay_stage_eligible_jobs(
+            manifest,
+            run_store=store,
             job_id=job_id,
             status=status,
-            include=include,
+            include_selectors=include,
             force=force,
         )
-        jobs_by_queue: dict[str, list[JobEnvelope]] = {}
-        for state in states:
-            job = JobEnvelope.model_validate(state.job)
-            job.resolve_partition_key()
-            declare_partition_queues(manifest, job.partition_key)
-            queue_name = manifest.stage_input_queue(
-                state.stage, job.partition_key
-            )
-            store.mark_job_pending(
-                job=job,
-                stage=state.stage,
-                queue_name=queue_name,
-            )
-            jobs_by_queue.setdefault(queue_name, []).append(job)
-        for queue_name, jobs in jobs_by_queue.items():
-            seed_jobs(queue_name=queue_name, jobs=jobs)
-        typer.echo(f"replayed={len(states)} run_id={run_id}")
+        typer.echo(f"replayed={replayed} run_id={run_id}")
     finally:
         store.close()
 
