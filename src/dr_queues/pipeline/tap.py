@@ -9,7 +9,8 @@ from dr_queues.amqp.connection import (
     delivery_tag,
     open_connection,
 )
-from dr_queues.events.schema import EventKind, PipelineEvent
+from dr_queues.events.schema import EventKind
+from dr_queues.pipeline.execution import StageExecution
 from dr_queues.pipeline.job import JobEnvelope
 from dr_queues.runtime.store import MongoRunStore
 
@@ -30,6 +31,10 @@ class TerminalTap:
         self.completed_queues = completed_queues or [completed_queue]
         self.run_id = run_id
         self.run_store = run_store
+        self.stage_execution = StageExecution.from_event_sink(
+            event_sink=run_store,
+            stage_name=STAGE_NAME,
+        )
         self._stop = Event()
         self._thread: Thread | None = None
         self._done = Event()
@@ -87,19 +92,8 @@ class TerminalTap:
             channel.basic_ack(delivery_tag=tag)
             return
 
-        self.run_store.append_event(
-            PipelineEvent(
-                run_id=job.run_id,
-                job_id=job.job_id,
-                lane=job.lane,
-                stage=STAGE_NAME,
-                event=EventKind.TERMINAL,
-                payload=job.model_dump(),
-            ),
-        )
-        self.run_store.mark_job_terminal(
+        self.stage_execution.record_terminal(
             job=job,
-            stage=STAGE_NAME,
             queue_name=getattr(method, "routing_key", self.completed_queue),
         )
         channel.basic_ack(delivery_tag=tag)

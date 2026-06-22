@@ -573,3 +573,173 @@ What happened:
 Actions taken:
 
 - None beyond the cleanup described above.
+
+## Stage Execution Runtime Seam
+
+Completion criteria for this pass:
+
+- Normal in-process execution reaches the expected terminal count and leaves
+  empty queues.
+- Held work is persisted as `held`, acknowledged out of the hot queue path,
+  and can complete after hold clear plus replay.
+- Handler failures create durable attempts and latest job state before the
+  delivery is acknowledged.
+- A store that cannot record failures causes the worker to nack and requeue.
+- Terminal tap recording still writes terminal events and terminal job state.
+- All detached manual workers are stopped at the end.
+
+### Environment And Fixtures
+
+What tested:
+
+- Started local RabbitMQ and MongoDB with `docker compose up -d`.
+- Used ignored helper files under `.cache/manual-stage-execution/` for a
+  two-stage `classify -> finalize` pipeline and custom manual handlers.
+- Used run IDs prefixed with `manual-20260622-stage-exec-*`.
+
+Why:
+
+- Verify the new `StageExecution` abstraction against real local runtime
+  services while keeping reusable scratch fixtures out of the tracked tree.
+
+What happened:
+
+- MongoDB was already running.
+- RabbitMQ started successfully.
+- The helper handler module raised `RuntimeError("manual rate limit")` only
+  when `DR_QUEUES_MANUAL_FAIL_CLASSIFY=1` and the job target tag was
+  `quota_pool=openai-nano`.
+
+Actions taken:
+
+- None.
+
+### In-Process Happy Path
+
+What tested:
+
+- Ran `dr-queues-demo` for `manual-20260622-stage-exec-happy-094136` with
+  4 expected jobs and one worker for each demo stage.
+- Checked `status`, `failures`, `attempts`, and terminal event counts.
+
+Why:
+
+- Verify `StageExecution.run` still records started/output events, marks jobs
+  running and completed, forwards successful jobs, and lets the terminal tap
+  record completion in the normal Mongo-backed path.
+
+What happened:
+
+- The demo completed with `events=28 terminals=4`.
+- `status` reported `terminals=4/4`, `completed=12 terminal=4`, and empty
+  input/output queues for all three stages.
+- `failures` and `attempts` returned no rows.
+
+Actions taken:
+
+- None.
+
+### Target Hold And Replay
+
+What tested:
+
+- Created `manual-20260622-stage-exec-hold-094136` with one control job and
+  one job tagged `quota_pool=gemini-flash`.
+- Set a hold on `quota_pool=gemini-flash`.
+- Started detached `finalize` and `classify` workers with the manual handler
+  module.
+- Waited for terminal completion before and after clearing the hold and
+  replaying the held job.
+
+Why:
+
+- Verify `StageExecution` checks holds before calling the handler, persists the
+  held state, acknowledges the held delivery, and does not forward held work
+  until an operator clears and replays it.
+
+What happened:
+
+- An initial parallel setup attempt launched `seed` before `init` had finished,
+  so `seed` exited with `RunNotFoundError`.
+- After rerunning `seed` sequentially, the run behaved as expected.
+- Before clearing the hold, `wait --target terminal --timeout 5` exited
+  nonzero with `terminals=1/2`.
+- `status` reported `completed=2 held=1 terminal=1`; both stage queues were
+  empty.
+- `failures` listed `hold-gemini-1` as `status=held`, `attempts=0`, and
+  `detail=None`.
+- `attempts` returned no rows.
+- After `holds clear` and `replay --status held --force`, the run completed
+  with `terminals=2/2` and final job states `completed=4 terminal=2`.
+- Terminal event counting reported `events=10 terminals=2`.
+- The detached workers were stopped; `workers` showed both records as
+  `status=stopped`.
+
+Actions taken:
+
+- Reran the seed step sequentially after the manual setup race.
+- No code changes were needed.
+
+### Recorded Failure And Recovery
+
+What tested:
+
+- Created `manual-20260622-stage-exec-failure-094136` with one job tagged
+  `quota_pool=openai-nano`.
+- Started a detached `classify` worker with
+  `DR_QUEUES_MANUAL_FAIL_CLASSIFY=1`.
+- Replayed the `retry_waiting` job twice to exhaust the default retry budget.
+- Stopped the failing worker, started successful `classify` and `finalize`
+  workers, replayed the `dead_lettered` job, and waited for terminal
+  completion.
+
+Why:
+
+- Verify handler exceptions go through durable failure recording before ack,
+  retry/dead-letter state is inspectable, and a fixed handler can recover the
+  same persisted job through manual replay.
+
+What happened:
+
+- After the first failure, `failures` listed `failure-openai-1` as
+  `status=retry_waiting`, `attempts=1`, and `detail=manual rate limit`.
+- `status` reported `terminals=0/1`, `retry_waiting=1`, and zero queue depth,
+  showing the failed delivery was acknowledged after persistence.
+- After two forced replays, `attempts` showed attempt `1` and `2` as
+  `retry_waiting`, and attempt `3` as `dead_lettered`.
+- `failures` showed the job as `dead_lettered` with `attempts=3`.
+- After restarting successful workers and replaying the dead-lettered job,
+  `wait --target terminal` returned `terminals=1/1`.
+- Final `status` reported `completed=2 terminal=1` and empty queues.
+- Historical failed attempts remained visible after successful recovery.
+- Terminal event counting reported `events=8 terminals=1`.
+- All three detached worker records for the run ended as `status=stopped`.
+
+Actions taken:
+
+- None.
+
+### Failure Persistence Fallback Redelivery
+
+What tested:
+
+- Ran a small `uv run python` probe that constructed a `WorkerPool` with
+  `MemoryEventSink`, a failing handler, and fake channel/method objects.
+- Called `_on_message` directly with one `JobEnvelope`.
+
+Why:
+
+- Verify the `EventSinkStageExecutionStore` adapter returns the
+  failure-not-recorded sentinel for sinks that cannot persist attempts, causing
+  the worker to nack and requeue instead of acknowledging an unrecorded
+  failure.
+
+What happened:
+
+- The probe printed `acked=[]`.
+- The probe printed `nacked=[(7, True)]`.
+- The memory sink contained only `STAGE_STARTED`.
+
+Actions taken:
+
+- None.
