@@ -15,10 +15,6 @@ class StageQueues(BaseModel):
     pending_name: str
     completed_name: str
 
-    @classmethod
-    def get_queue_name(cls, prefix: str, role: str) -> str:
-        return f"{prefix}.{role}"
-
     def declare_queues(
         self,
         *,
@@ -52,10 +48,8 @@ def build_stage_queues(
     completed: str | None = None,
     delivery_mode: PikaDeliveryMode = PikaDeliveryMode.PERSISTENT,
 ) -> StageQueues:
-    pending_name = pending or StageQueues.get_queue_name(prefix, "pending")
-    completed_name = completed or StageQueues.get_queue_name(
-        prefix, "completed"
-    )
+    pending_name = pending or f"{prefix}.pending"
+    completed_name = completed or f"{prefix}.completed"
     stage_queues = StageQueues(
         prefix=prefix,
         delivery_mode=delivery_mode,
