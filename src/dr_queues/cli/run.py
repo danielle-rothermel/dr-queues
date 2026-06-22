@@ -13,6 +13,7 @@ from dr_queues.pipeline.runner import (
 )
 from dr_queues.runtime import (
     MongoRunStore,
+    WorkerStartError,
     get_run_status,
     list_workers,
     replace_stage_workers,
@@ -153,14 +154,18 @@ def start(
     include: list[str] = typer.Option([], "--include"),
     exclude: list[str] = typer.Option([], "--exclude"),
 ) -> None:
-    process = start_stage_workers(
-        run_id=run_id,
-        stage=stage,
-        workers=workers,
-        handlers_module=handlers_module,
-        include_selectors=parse_selectors(include),
-        exclude_selectors=parse_selectors(exclude),
-    )
+    try:
+        process = start_stage_workers(
+            run_id=run_id,
+            stage=stage,
+            workers=workers,
+            handlers_module=handlers_module,
+            include_selectors=parse_selectors(include),
+            exclude_selectors=parse_selectors(exclude),
+        )
+    except WorkerStartError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
     typer.echo(f"started pid={process.pid} run_id={run_id} stage={stage}")
 
 
@@ -176,14 +181,18 @@ def replace(
     include: list[str] = typer.Option([], "--include"),
     exclude: list[str] = typer.Option([], "--exclude"),
 ) -> None:
-    process = replace_stage_workers(
-        run_id=run_id,
-        stage=stage,
-        workers=workers,
-        handlers_module=handlers_module,
-        include_selectors=parse_selectors(include),
-        exclude_selectors=parse_selectors(exclude),
-    )
+    try:
+        process = replace_stage_workers(
+            run_id=run_id,
+            stage=stage,
+            workers=workers,
+            handlers_module=handlers_module,
+            include_selectors=parse_selectors(include),
+            exclude_selectors=parse_selectors(exclude),
+        )
+    except WorkerStartError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
     typer.echo(f"replaced pid={process.pid} run_id={run_id} stage={stage}")
 
 

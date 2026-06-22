@@ -1,4 +1,5 @@
 from dr_queues.runtime.lifecycle import (
+    WorkerStartError,
     list_workers,
     replace_stage_workers,
     start_stage_workers,
@@ -51,6 +52,7 @@ __all__ = [
     "TargetHold",
     "TargetSelector",
     "WorkerProcessRecord",
+    "WorkerStartError",
     "WorkerStatus",
     "derive_partition_key",
     "get_run_status",

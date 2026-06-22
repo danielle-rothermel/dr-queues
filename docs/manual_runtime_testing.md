@@ -219,6 +219,159 @@ Actions taken:
 - Deleted the pre-existing `.runs` directory at the user's request.
 - Verified there are no `.runs*` paths left under the repository root.
 
+## Target-Aware Failure Controls
+
+Completion criteria for this pass:
+
+- A default, non-targeted run still completes using the default partition.
+- Workers started with a target selector only process matching pending jobs.
+- A selector that matches no pending or known jobs exits nonzero and does not
+  report a fake started worker.
+- Target holds persist affected jobs as `held`, keep them out of normal worker
+  processing, and allow manual replay after the hold clears.
+- Failed attempts persist in `job_attempts`, retryable failures can be replayed,
+  retry exhaustion moves the job to `dead_lettered`, and a dead-lettered job can
+  be manually replayed with a fixed handler.
+- All manual workers for these runs are stopped at the end.
+
+### Default Partition Regression
+
+What tested:
+
+- Ran `dr-queues-demo` for `manual-20260622-baseline` with one expected job.
+
+Why:
+
+- Verify the target-aware changes did not break the original default-partition
+  path for jobs without target tags.
+
+What happened:
+
+- The run completed with `events=7 terminals=1`.
+- `dr-queues-run status` reported `terminals=1/1`.
+- Job state counts showed `completed=3 terminal=1`.
+
+Actions taken:
+
+- None.
+
+### Selector-Scoped Workers
+
+What tested:
+
+- Created `manual-20260622-targets` with four jobs: two tagged
+  `provider=openai` and two tagged `provider=gemini`.
+- Started `classify` and `finalize` workers with `--include provider=openai`.
+- Waited briefly for terminal completion.
+
+Why:
+
+- Verify queue workers can target only a subset of pending jobs, which supports
+  continuing on one provider while another provider is paused or rate-limited.
+
+What happened:
+
+- The terminal wait intentionally exited nonzero because only the OpenAI subset
+  was eligible for those workers.
+- Status reported `terminals=2/4`.
+- Job states showed the two OpenAI jobs completed and terminal, while the two
+  Gemini jobs remained pending in their partition.
+
+Actions taken:
+
+- None for the selector-scoped processing path.
+
+### No-Match Worker Start
+
+What tested:
+
+- Tried to start a `classify` worker on `manual-20260622-targets` with
+  `--include provider=anthropic`, which matched no run partitions.
+
+Why:
+
+- Verify operator mistakes or temporarily empty target selections fail clearly
+  instead of creating misleading worker records.
+
+What happened:
+
+- The first attempt printed `started pid=...` and exited zero, but the child
+  process exited shortly afterward and no worker record was created.
+
+Actions taken:
+
+- Added parent-side partition preflight in `start_stage_workers`, so selector
+  combinations that match no known partitions fail before spawning a worker.
+- Kept the immediate child-exit check for other early startup failures.
+- Added focused regression tests for successful starts, no-match selector
+  starts, and immediate child exits.
+
+Retest result:
+
+- The no-match command now prints
+  `No matching partitions for run_id='manual-20260622-targets' stage='classify' and selectors.`
+  and exits with code `1`.
+
+### Target Holds And Replay
+
+What tested:
+
+- Created `manual-20260622-holds` with one OpenAI job and two Gemini jobs.
+- Set a hold on `quota_pool=gemini-flash`.
+- Started a Gemini `classify` worker while the hold was active.
+- Cleared the hold, replayed held Gemini jobs, started matching downstream
+  workers, and started OpenAI workers for the remaining job.
+
+Why:
+
+- Verify rate-limit style holds persist blocked target work and allow manual
+  recovery without dropping or silently requeuing jobs.
+
+What happened:
+
+- While held, `failures` listed both Gemini jobs as `status=held` with
+  `attempts=0`.
+- Status showed `pending=1 held=2`, with the OpenAI job still pending.
+- After clearing the hold and replaying, the run completed with
+  `terminals=3/3`.
+- Final job states showed `completed=6 terminal=3`.
+
+Actions taken:
+
+- None.
+
+### Retry, Dead Letter, And Manual Recovery
+
+What tested:
+
+- Created `manual-20260622-failures` with one Gemini job and a handler that
+  raises `RuntimeError("manual rate limit")`.
+- Replayed the `retry_waiting` job twice to exhaust the default retry budget.
+- Stopped the failing worker, started a successful handler, replayed the
+  `dead_lettered` job, and waited for terminal completion.
+
+Why:
+
+- Verify failures are durably inspectable, retries are explicit operator
+  actions, retry exhaustion is visible, and manual recovery can reuse the same
+  persisted job state.
+
+What happened:
+
+- After the first failure, `attempts` showed attempt `1` with action
+  `retry_waiting`, and `failures` showed the job in `retry_waiting`.
+- After two more replays, `attempts` showed three records: attempts `1` and `2`
+  as `retry_waiting`, and attempt `3` as `dead_lettered`.
+- `failures` showed the job as `dead_lettered` with `attempts=3`.
+- After switching to the successful handler and replaying dead-lettered work,
+  `wait --target terminal` returned `terminals=1/1`.
+- The historical failed attempt records remained visible after successful
+  recovery.
+
+Actions taken:
+
+- None.
+
 ## Post-Test Cleanup
 
 What tested:
@@ -233,11 +386,12 @@ Why:
 
 What happened:
 
-- Deleted 3 run manifests, 3 seed batches, 2927 pipeline events, and 12 worker
-  records from Mongo.
+- Deleted 4 run manifests, 4 seed batches, 38 pipeline events, 8 worker
+  records, 23 job states, 3 job attempts, and 1 target hold from Mongo for
+  the target-aware manual runs.
 - Deleted the RabbitMQ queues from the persisted manual run manifests.
 - Verified Mongo has zero `manual-20260622-*` manifests, seed batches, events,
-  or worker records.
+  worker records, job states, job attempts, or target holds.
 - Verified there are no `.runs*` paths under the repository root.
 
 Actions taken:
