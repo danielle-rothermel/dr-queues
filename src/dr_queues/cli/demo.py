@@ -57,14 +57,15 @@ def _build_pipeline(
 
 
 def _build_event_sink(sink: str):
-    if sink == "mongo":
-        return MongoEventSink()
-    if sink == "amqp":
-        return AmqpEventSink()
-    if sink == "both":
-        return CompositeEventSink(
-            [MongoEventSink(), AmqpEventSink()],
-        )
+    match sink:
+        case "mongo":
+            return MongoEventSink()
+        case "amqp":
+            return AmqpEventSink()
+        case "both":
+            return CompositeEventSink(
+                [MongoEventSink(), AmqpEventSink()],
+            )
     msg = f"Unknown sink {sink!r}; expected mongo, amqp, or both."
     raise typer.BadParameter(msg)
 
