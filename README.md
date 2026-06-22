@@ -184,6 +184,10 @@ attempts, and recent pipeline events without exposing worker controls or replay
 actions. The dashboard includes a local auto-refresh selector with off, 1s, 2s,
 5s, and 10s intervals.
 
+See [`docs/verification/dashboard_demos.md`](docs/verification/dashboard_demos.md)
+for dashboard demo scenarios covering in-process progress, detached workers,
+holds, and failure attempts.
+
 ### Notebooks
 
 Two [marimo](https://marimo.io/) notebooks under `notebooks/` provide a

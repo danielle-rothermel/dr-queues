@@ -1,8 +1,7 @@
 # Dashboard Demo Verification Notes
 
 These demos exercise the local observability dashboard from progressively more
-operational angles. The first two were run during dashboard development. The
-third is the next designed verification scenario for Holds and Attempts.
+operational angles. All three were run during dashboard development.
 
 ## Demo 1: In-process pipeline progress
 
@@ -87,7 +86,22 @@ records were visible while running, and all three workers were stopped cleanly.
 
 ## Demo 3: Holds and attempts
 
-Status: designed, not yet run.
+Status: run successfully.
+
+Run ID:
+
+- `viewer-demo-controls-085611`
+
+Observed parameters:
+
+- Expected jobs: `36`
+- Target groups: `control=12`, `held=12`, `failing=12`
+- Active hold selector: `quota_pool=gemini-flash`
+- Failing selector: `quota_pool=openai-nano`
+- Workers: `slow=1,transform=1,finalize=1`
+- Worker PIDs: `60894`, `60893`, `60892`
+- Final observed state: `held=12`, `retry_waiting=12`, `attempts=12`,
+  `terminals=12/36`
 
 Reason:
 
@@ -96,7 +110,7 @@ can show the control and failure surfaces together. Demo 1 and demo 2 are happy
 path demos; this one should make Holds, Attempts, Blocked jobs, and partial
 progress obvious.
 
-Suggested scenario:
+Scenario:
 
 - Seed one run with three target groups:
   - `control` jobs that should complete normally.
@@ -106,7 +120,7 @@ Suggested scenario:
 
 ```bash
 uv run dr-queues-run holds set \
-  --run-id YOUR_RUN_ID \
+  --run-id viewer-demo-controls-085611 \
   --selector quota_pool=gemini-flash \
   --reason "demo quota hold"
 ```
@@ -119,17 +133,24 @@ What to look for:
 - Holds shows one active hold for `quota_pool=gemini-flash`.
 - Blocked jobs includes held jobs with status `held`.
 - Attempts shows failed transform attempts for `quota_pool=openai-nano`.
-- Blocked jobs also includes failed jobs with status `retry_waiting` or
-  `dead_lettered`, depending on max attempts.
-- Overall progress climbs for control jobs and then stalls below 100%.
+- Blocked jobs also includes failed jobs with status `retry_waiting`.
+- Overall progress climbs for control jobs and then stalls at `12/36`.
 - Stage progress makes the stopping point visible.
 - Workers remains populated if detached workers are used.
 - Events show normal activity for control jobs and partial activity for failing
   jobs.
 
-What this should teach:
+What this taught:
 
 Holds are intentional operational pauses, while Attempts are evidence of actual
 handler failures. Seeing both in one run should make the dashboard useful for
 triage: a user can distinguish work that was deliberately paused from work that
 failed and needs retry, replay, or handler repair.
+
+Operational note:
+
+The one-off shell runner used for this demo contained an inspection-loop typo:
+it called a non-existent `MongoRunStore.read_run_progress` helper after the
+workers had already produced the intended hold and failure state. The dashboard
+state was still valid. Cleanup stopped all detached workers, and a short
+`wait_for_run` call created terminal events for the completed control jobs.
