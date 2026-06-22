@@ -8,19 +8,16 @@ from uuid import uuid4
 import typer
 
 from dr_queues import (
-    AmqpEventSink,
-    CompositeEventSink,
     EventKind,
-    MongoEventSink,
+    MongoRunStore,
     Pipeline,
     PipelineDefinition,
     PipelineLane,
     PipelineStep,
     filter_run_events,
-    manifest_path,
     parse_workers_arg,
     run_in_process,
-    seed_manifest_jobs,
+    seed_run,
     setup_run_queues,
 )
 
@@ -56,27 +53,12 @@ def _build_pipeline(
     return Pipeline(definition, registry)
 
 
-def _build_event_sink(sink: str):
-    match sink:
-        case "mongo":
-            return MongoEventSink()
-        case "amqp":
-            return AmqpEventSink()
-        case "both":
-            return CompositeEventSink(
-                [MongoEventSink(), AmqpEventSink()],
-            )
-    msg = f"Unknown sink {sink!r}; expected mongo, amqp, or both."
-    raise typer.BadParameter(msg)
-
-
 @app.command()
 def main(
     repeats: int = typer.Option(2, "--repeats"),
     lanes: int = typer.Option(2, "--lanes"),
     workers: str = typer.Option(DEFAULT_WORKERS, "--workers"),
     run_id: str | None = typer.Option(None, "--run-id"),
-    sink: str = typer.Option("mongo", "--sink"),
     handlers_module: str = typer.Option(
         HANDLERS_MODULE,
         "--handlers-module",
@@ -91,34 +73,34 @@ def main(
         default=2,
     )
     expected = pipeline.expected_job_count(repeats)
-    event_sink = _build_event_sink(sink)
+    run_store = MongoRunStore()
 
     manifest = setup_run_queues(
         pipeline=pipeline,
         run_id=resolved_run_id,
         workers_by_stage=workers_by_stage,
         expected_jobs=expected,
+        run_store=run_store,
     )
     jobs = pipeline.make_seed_jobs(run_id=resolved_run_id, repeats=repeats)
-    seed_manifest_jobs(manifest, jobs)
+    seed_run(manifest, jobs, run_store=run_store)
 
     typer.echo(f"run_id={resolved_run_id}")
-    typer.echo(f"manifest={manifest_path(resolved_run_id)}")
-    typer.echo(f"expected_jobs={expected} sink={sink}")
+    typer.echo(f"expected_jobs={expected} store=mongo")
 
     run_in_process(
         manifest=manifest,
         pipeline=pipeline,
         workers_by_stage=workers_by_stage,
-        event_sink=event_sink,
+        run_store=run_store,
         completion_timeout=completion_timeout,
     )
 
     events = filter_run_events(
-        event_sink.read_by_run_id(resolved_run_id),
+        run_store.read_by_run_id(resolved_run_id),
         resolved_run_id,
     )
-    event_sink.close()
+    run_store.close()
     terminals = [
         event for event in events if event.event == EventKind.TERMINAL
     ]

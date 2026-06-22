@@ -1,11 +1,11 @@
 # dr-queues
 
-RabbitMQ multi-stage pipeline runtime with append-only event sinks.
+RabbitMQ multi-stage pipeline runtime with MongoDB-backed run state.
 
-dr-queues is a domain-free library for running jobs through chained stage
-queues, scaling worker pools per stage, and recording pipeline lifecycle
-events to durable storage. It is the execution substrate for experiment
-applications such as [dr-bottleneck](https://github.com/danielle-rothermel/dr-bottleneck).
+dr-queues is a domain-free library for running jobs through chained RabbitMQ
+stage queues, scaling worker pools per stage, and recording run state in
+MongoDB. It is the execution substrate for experiment applications such as
+[dr-bottleneck](https://github.com/danielle-rothermel/dr-bottleneck).
 
 ## Install
 
@@ -33,8 +33,8 @@ dr-queues-demo --repeats 2 --lanes 1
 - AMQP staged pipeline: per-stage pending/completed queue pairs chained together
 - Slim `JobEnvelope` for job state on the wire
 - `WorkerPool` and `TerminalTap` with pluggable step handlers
-- Append-only `EventSink` implementations (MongoDB happy path, AMQP optional)
-- Run manifest for multi-process worker coordination
+- MongoDB-backed manifests, events, seed batches, and worker records
+- RabbitMQ durable job transport for queued and in-flight work
 - Minimal workflow engine: ordered steps + `HandlerRegistry`
 
 ## What dr-queues is not
@@ -57,8 +57,8 @@ write-ahead log: durable telemetry precedes propagation.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `AMQP_URL` | `amqp://guest:guest@localhost:5672/` | RabbitMQ connection |
-| `MONGODB_URL` | `mongodb://localhost:27017/dr_queues` | MongoDB event store |
+| `AMQP_URL` | `amqp://guest:guest@localhost:5672/` | RabbitMQ job transport |
+| `MONGODB_URL` | `mongodb://localhost:27017/dr_queues` | MongoDB runtime store |
 
 ## Local services
 
@@ -90,26 +90,20 @@ uv run python scripts/run_pipeline_demo.py \
 ```
 
 The demo runs a 3-stage dummy pipeline (`sleep_ms` → `add_prefix` →
-`record_artifact`) with MongoDB as the default event sink.
+`record_artifact`) with MongoDB as the runtime store.
 
-Options:
-
-```bash
-dr-queues-demo --sink amqp --repeats 2
-dr-queues-demo --sink both --lanes 1 --repeats 1
-```
-
-Each run writes a manifest to `.runs/{run_id}/manifest.json`. The demo prints
-`run_id=...` at the start — use that value when querying MongoDB (do not use the
-literal placeholder `demo-...`).
+Each run stores its manifest and events in MongoDB. The demo prints
+`run_id=...` at the start; use that value when querying MongoDB or running
+`dr-queues-run status`.
 
 On success you should see output like `events=70 terminals=10` for
 `--repeats 5` with the default 2 lanes (10 jobs × 7 events per job).
 
-### Inspect events in MongoDB
+### Inspect MongoDB runtime state
 
-Events are stored in the `pipeline_events` collection. Replace
-`YOUR_RUN_ID` with the `run_id` printed by the demo (e.g. `demo-56bd0ce5`).
+Run manifests live in `run_manifests`, events in `pipeline_events`, seed
+batches in `seed_batches`, and worker records in `worker_processes`. Replace
+`YOUR_RUN_ID` with the `run_id` printed by the demo.
 
 Count events for one run:
 
@@ -139,13 +133,15 @@ mongosh mongodb://localhost:27017/dr_queues \
   --eval 'db.pipeline_events.find({run_id: "YOUR_RUN_ID"}).limit(3).pretty()'
 ```
 
-If counts are zero, check:
+Use the operational CLI for run status:
 
-- You used the **actual** `run_id` from demo output, not the placeholder text.
-- The demo used the default Mongo sink (`--sink mongo`). AMQP-only runs
-  (`--sink amqp`) do not write to MongoDB.
-- MongoDB is running (`docker compose up -d`) and reachable at `MONGODB_URL`.
-- You re-ran the demo after starting Mongo if the first attempt failed to connect.
+```bash
+dr-queues-run status --run-id YOUR_RUN_ID
+dr-queues-run wait --run-id YOUR_RUN_ID --target terminal --timeout 120
+```
+
+If counts are zero, check that MongoDB is running and that you used the actual
+`run_id` from demo output, not the placeholder text.
 
 ## Package layout
 
@@ -153,18 +149,19 @@ If counts are zero, check:
 |--------|------|
 | `amqp/` | Connection helpers, stage queue pairs |
 | `pipeline/` | `JobEnvelope`, `WorkerPool`, `TerminalTap`, runner |
-| `events/` | `PipelineEvent`, `EventSink`, Mongo/AMQP/memory sinks, event filters |
-| `manifest/` | Run manifest read/write, worker CLI helpers |
+| `events/` | `PipelineEvent`, local test sink, event filters |
+| `manifest/` | Run manifest models and worker spec parsing |
+| `runtime/` | Mongo run store, status, wait, worker lifecycle |
 | `workflow/` | `PipelineDefinition`, `HandlerRegistry`, `Pipeline` |
 
 ## Public API
 
 Import from `dr_queues`:
 
-- **Setup / run:** `setup_run_queues`, `run_in_process`, `seed_jobs`, `seed_manifest_jobs`
-- **Runtime:** `WorkerPool`, `TerminalTap`, `JobEnvelope`
+- **Setup / run:** `setup_run_queues`, `seed_run`, `run_in_process`
+- **Runtime:** `MongoRunStore`, `get_run_status`, `wait_for_run`, `WorkerPool`, `TerminalTap`, `JobEnvelope`
 - **Workflow:** `PipelineDefinition`, `HandlerRegistry`, `Pipeline`
-- **Events:** `PipelineEvent`, `EventSink`, `MongoEventSink`, `AmqpEventSink`, `MemoryEventSink`, `filter_run_events`
+- **Events:** `PipelineEvent`, `filter_run_events`
 
 ## Detached stage workers
 
@@ -174,12 +171,21 @@ Resize or run a single stage in a separate process:
 dr-queues-stage-worker \
   --run-id demo-abc123 \
   --stage transform \
-  --workers 5 \
-  --replace
+  --workers 5
 ```
 
 Handlers must be registered in the worker process via `--handlers-module`
 (default: `dr_queues.demo_handlers`).
+
+Use `dr-queues-run replace` to stop current workers for a stage and start a new
+worker process:
+
+```bash
+dr-queues-run replace \
+  --run-id demo-abc123 \
+  --stage transform \
+  --workers 5
+```
 
 ## Future layers
 
@@ -193,7 +199,7 @@ dr-queues stays focused on queue-based execution and pipeline telemetry.
 ```bash
 uv sync
 docker compose up -d
-scripts/pre-check.sh              # ruff, ty, pytest (14 tests)
+scripts/pre-check.sh              # ruff, ty, pytest
 uv run pytest -m integration      # integration tests only; needs docker compose
 ```
 
@@ -203,9 +209,6 @@ Full manual smoke test:
 dr-queues-demo \
   --repeats 5 \
   --workers slow=4,transform=4,finalize=2
-
-# optional: exercise AMQP event sink instead of Mongo
-dr-queues-demo --sink amqp --repeats 2
 ```
 
 Build a wheel locally before publishing:

@@ -4,7 +4,7 @@ from dr_queues.events.schema import EventKind, filter_run_events
 from dr_queues.manifest.manifest import parse_workers_arg
 from dr_queues.pipeline.runner import (
     run_in_process,
-    seed_manifest_jobs,
+    seed_run,
     setup_run_queues,
 )
 
@@ -12,7 +12,7 @@ from dr_queues.pipeline.runner import (
 @pytest.mark.integration
 @pytest.mark.usefixtures("rabbitmq_connection")
 def test_pipeline_in_process(
-    memory_sink,
+    mongo_run_store,
     demo_pipeline,
     unique_run_id,
 ) -> None:
@@ -28,20 +28,21 @@ def test_pipeline_in_process(
         run_id=unique_run_id,
         workers_by_stage=workers_by_stage,
         expected_jobs=expected,
+        run_store=mongo_run_store,
     )
     jobs = demo_pipeline.make_seed_jobs(run_id=unique_run_id, repeats=repeats)
-    seed_manifest_jobs(manifest, jobs)
+    seed_run(manifest, jobs, run_store=mongo_run_store)
 
     run_in_process(
         manifest=manifest,
         pipeline=demo_pipeline,
         workers_by_stage=workers_by_stage,
-        event_sink=memory_sink,
+        run_store=mongo_run_store,
         completion_timeout=60.0,
     )
 
     events = filter_run_events(
-        memory_sink.read_by_run_id(unique_run_id),
+        mongo_run_store.read_by_run_id(unique_run_id),
         unique_run_id,
     )
     terminals = [
@@ -58,6 +59,7 @@ def test_pipeline_in_process(
 @pytest.mark.integration
 @pytest.mark.usefixtures("rabbitmq_connection")
 def test_runner_setup_chains_queues(
+    mongo_run_store,
     demo_pipeline,
     unique_run_id,
 ) -> None:
@@ -71,6 +73,7 @@ def test_runner_setup_chains_queues(
         run_id=unique_run_id,
         workers_by_stage=workers_by_stage,
         expected_jobs=4,
+        run_store=mongo_run_store,
     )
     assert len(manifest.stages) == 3
     assert manifest.stages[0].output_queue == manifest.stages[1].input_queue

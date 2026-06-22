@@ -32,6 +32,7 @@ Issues = "https://github.com/danielle-rothermel/dr-queues/issues"
 
 [project.scripts]
 dr-queues-demo = "dr_queues.cli.demo:run"
+dr-queues-run = "dr_queues.cli.run:run"
 dr-queues-stage-worker = "dr_queues.cli.stage_worker:run"
 
 [build-system]
