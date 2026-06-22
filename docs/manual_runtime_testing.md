@@ -27,6 +27,181 @@ Manual testing is complete when all of these are true:
 - Verified RabbitMQ connectivity through `open_connection()`.
 - Used the local Mongo database at `mongodb://localhost:27017/dr_queues`.
 
+## Runtime Observability And Append Retest
+
+Completion criteria for this pass:
+
+- In-process and detached executions both leave worker records visible to
+  `dr-queues-run workers` and the viewer snapshot API.
+- Active worker counts distinguish currently running workers from historical
+  stopped worker records.
+- A run can start with zero expected jobs, receive an initial seed batch, reach
+  completion, receive an additional seed batch under the same run ID, and update
+  expected and terminal counts from seed-batch state.
+- Duplicate job IDs are rejected without changing the run's expected count.
+- All manually started detached workers are stopped at the end.
+
+### Environment Note
+
+What tested:
+
+- Tried to start local dependencies with `docker compose up -d`.
+- Reused the available local RabbitMQ and MongoDB services after checking the
+  port conflict.
+
+Why:
+
+- Verify the manual run used real queue and store services while avoiding
+  disruption to another local stack already bound to RabbitMQ ports.
+
+What happened:
+
+- The repo Mongo container was already running on port 27017.
+- RabbitMQ port 5672 was already owned by
+  `dr-bottleneckqueues-rabbitmq-1`, so the repo RabbitMQ container could not
+  bind the same host port.
+- The existing RabbitMQ service accepted connections, and Mongo ping succeeded.
+
+Actions taken:
+
+- Used the existing localhost RabbitMQ plus the running repo MongoDB for this
+  manual pass.
+
+### In-Process Worker Parity
+
+What tested:
+
+- Ran `dr-queues-demo` for
+  `manual-20260622-runtime-v2-inproc-7df18d` with 6 terminal jobs and one
+  worker for each stage.
+- Queried `dr-queues-run status`, `dr-queues-run workers`, and the viewer
+  snapshot API.
+
+Why:
+
+- Verify that in-process demo workers now write the same runtime worker records
+  that detached workers write, so the dashboard does not show an empty Workers
+  panel for a real in-process run.
+
+What happened:
+
+- The demo completed with `events=42 terminals=6`.
+- `status` reported `terminals=6/6`; all three stages were `6/6` with empty
+  queues.
+- `workers` reported one stopped `runtime=in_process` worker for each stage,
+  all with `concurrency=1`.
+- The viewer snapshot API returned HTTP 200 with `expected_jobs=6`,
+  `terminal_jobs=6`, and three stopped in-process worker records.
+
+Actions taken:
+
+- None.
+
+### Detached Empty Start And First Seed
+
+What tested:
+
+- Initialized `manual-20260622-runtime-v2-detached-7df18d` from a manifest
+  without seeding any jobs.
+- Started one detached worker for each stage before adding input work.
+- Seeded a first batch of 4 jobs and waited for terminal completion.
+
+Why:
+
+- Verify that worker observability does not depend on seeding order and that a
+  run can intentionally exist at `0/0` before input work is added.
+
+What happened:
+
+- Initial status after `init` was `terminals=0/0`, with zero worker records.
+- After starting detached workers, status stayed `0/0` but each stage showed
+  `worker_records=1/1` and `worker_concurrency=1`.
+- `workers` reported one running `runtime=detached` worker for each stage.
+- Seeding the first batch reported `seeded=4`.
+- `wait --target terminal` completed with `terminals=4/4`.
+- Status reported `expected_jobs=4`, `terminal_jobs=4`, all three stages
+  `4/4`, and active detached worker records.
+
+Actions taken:
+
+- None.
+
+### Append After Completed Idle Run
+
+What tested:
+
+- Stopped the first detached worker set after the run reached `4/4`.
+- Seeded a second batch of 2 new jobs into the same run ID.
+- Restarted detached workers and waited for terminal completion.
+
+Why:
+
+- Verify that appending work is a first-class seed-batch operation and that
+  completion ratios update from cumulative seed batches instead of a fixed
+  manifest field.
+
+What happened:
+
+- After stopping workers, status stayed `terminals=4/4` with no active worker
+  concurrency and one stopped worker record per stage.
+- Seeding the second batch reported `seeded=2`.
+- Status moved to `terminals=4/6`, with 2 pending jobs in the first stage input
+  queue and `worker_records=0/1` for every stage.
+- Restarting one detached worker per stage drained the appended work.
+- `wait --target terminal` completed with `terminals=6/6`.
+- Final status reported all stages `6/6`, empty queues, no active worker
+  concurrency, and two stopped detached worker records per stage.
+
+Actions taken:
+
+- None.
+
+### Duplicate Seed Guard
+
+What tested:
+
+- Attempted to seed the detached run again with the first batch's job IDs.
+
+Why:
+
+- Verify append support does not allow duplicate job publication or inflate the
+  derived expected count.
+
+What happened:
+
+- The duplicate seed command exited 1 with `DuplicateJobError`.
+- The error named the conflicting job IDs from the first batch.
+- A follow-up status check stayed at `terminals=6/6`; expected jobs did not
+  increase.
+
+Actions taken:
+
+- None.
+
+### Viewer Snapshot API
+
+What tested:
+
+- Queried `/api/runs/{run_id}/snapshot` through `fastapi.testclient.TestClient`
+  for both the in-process and detached retest runs.
+
+Why:
+
+- Verify the dashboard data source sees the same worker parity and derived
+  expected-job counts as the CLI status commands.
+
+What happened:
+
+- The in-process snapshot returned HTTP 200 with `expected_jobs=6`,
+  `terminal_jobs=6`, and three stopped `runtime=in_process` worker records.
+- The detached snapshot returned HTTP 200 with `expected_jobs=6`,
+  `terminal_jobs=6`, and six stopped `runtime=detached` worker records.
+- Each stage in both snapshots reported expected and completed counts of 6.
+
+Actions taken:
+
+- None.
+
 ## In-Process Baseline
 
 What tested:
