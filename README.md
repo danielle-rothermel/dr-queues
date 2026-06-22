@@ -37,6 +37,19 @@ dr-queues-demo --repeats 2 --lanes 1
 - RabbitMQ durable job transport for queued and in-flight work
 - Minimal workflow engine: ordered steps + `HandlerRegistry`
 
+## Runtime model
+
+dr-queues uses RabbitMQ and MongoDB for different jobs:
+
+- **RabbitMQ** is the durable queue transport. It owns pending messages,
+  completed-stage messages, delivery acknowledgements, redelivery, and queue
+  depth.
+- **MongoDB** is the persistence and query layer. It owns run manifests,
+  seed-batch records, pipeline events, and detached worker process records.
+
+There is no filesystem-backed runtime store. New runs should not create
+`.runs/<run_id>` state.
+
 ## What dr-queues is not
 
 - LLM calls, prompts, or model profiles
@@ -140,6 +153,14 @@ dr-queues-run status --run-id YOUR_RUN_ID
 dr-queues-run wait --run-id YOUR_RUN_ID --target terminal --timeout 120
 ```
 
+`status` combines Mongo progress records with RabbitMQ queue snapshots. Stage
+lines report active worker process records separately from total persisted
+records:
+
+```text
+stage=transform completed=10/10 input_depth=0 output_depth=0 workers=1 records=3
+```
+
 If counts are zero, check that MongoDB is running and that you used the actual
 `run_id` from demo output, not the placeholder text.
 
@@ -165,7 +186,8 @@ Import from `dr_queues`:
 
 ## Detached stage workers
 
-Resize or run a single stage in a separate process:
+Detached workers are controlled through Mongo worker records plus OS process
+signals on the local host. Start a single stage in a separate process:
 
 ```bash
 dr-queues-stage-worker \
@@ -177,8 +199,24 @@ dr-queues-stage-worker \
 Handlers must be registered in the worker process via `--handlers-module`
 (default: `dr_queues.demo_handlers`).
 
-Use `dr-queues-run replace` to stop current workers for a stage and start a new
-worker process:
+The operational CLI can start, replace, stop, list, and wait on detached
+workers:
+
+```bash
+dr-queues-run start \
+  --run-id demo-abc123 \
+  --stage transform \
+  --workers 5
+
+dr-queues-run workers --run-id demo-abc123
+
+dr-queues-run stop \
+  --run-id demo-abc123 \
+  --stage transform
+```
+
+Use `replace` to stop current running workers for a stage and start a new worker
+process:
 
 ```bash
 dr-queues-run replace \
@@ -186,6 +224,15 @@ dr-queues-run replace \
   --stage transform \
   --workers 5
 ```
+
+`wait --target terminal` also consumes final-stage completed messages through a
+terminal tap, so detached runs can reach terminal completion without an
+in-process runner.
+
+See [`docs/manual_runtime_testing.md`](docs/manual_runtime_testing.md) for the
+manual operational test log covering detached startup, scale up/down,
+kill/restart recovery, duplicate seed protection, and filesystem persistence
+checks.
 
 ## Future layers
 

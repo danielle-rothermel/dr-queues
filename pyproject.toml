@@ -1,7 +1,7 @@
 [project]
 name = "dr-queues"
 version = "0.1.1"
-description = "RabbitMQ multi-stage pipeline runtime with append-only event sinks"
+description = "RabbitMQ multi-stage pipeline runtime with MongoDB-backed run state"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

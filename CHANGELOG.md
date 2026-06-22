@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added MongoDB-backed run manifests, seed batches, worker records, status, wait,
+  and detached worker lifecycle controls.
+- Added manual runtime testing notes for detached worker startup, scaling,
+  kill/restart recovery, duplicate seed protection, and filesystem persistence
+  cleanup.
+
+### Changed
+
+- Clarified that RabbitMQ is the durable queue transport while MongoDB is the
+  persistence and query layer for runtime state.
+- Updated detached worker status output to distinguish active workers from
+  historical worker records.
+
+### Removed
+
+- Removed filesystem-backed runtime persistence for new runs.
+
 ## [0.1.1] - 2026-06-22
 
 ### Changed
@@ -29,5 +50,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Console entry points: `dr-queues-demo`, `dr-queues-stage-worker`
 - Reference dummy handlers in `dr_queues.demo_handlers`
 
+[Unreleased]: https://github.com/danielle-rothermel/dr-queues/compare/v0.1.1...HEAD
 [0.1.1]: https://github.com/danielle-rothermel/dr-queues/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/danielle-rothermel/dr-queues/releases/tag/v0.1.0
