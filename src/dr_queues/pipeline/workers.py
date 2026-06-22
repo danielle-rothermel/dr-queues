@@ -73,6 +73,10 @@ class WorkerPool:
     def stop(self) -> None:
         self._stop.set()
 
+    @property
+    def is_stopped(self) -> bool:
+        return self._stop.is_set()
+
     def join(self, timeout: float | None = None) -> None:
         for thread in self._threads:
             thread.join(timeout=timeout)

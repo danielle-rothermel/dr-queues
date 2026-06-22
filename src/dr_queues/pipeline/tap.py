@@ -10,8 +10,8 @@ from dr_queues.amqp.connection import (
     open_connection,
 )
 from dr_queues.events.schema import EventKind, PipelineEvent
-from dr_queues.events.sink import EventSink
 from dr_queues.pipeline.job import JobEnvelope
+from dr_queues.runtime.store import MongoRunStore
 
 STAGE_NAME = "terminal"
 THREAD_NAME = f"{STAGE_NAME}-tap"
@@ -24,16 +24,17 @@ class TerminalTap:
         completed_queue: str,
         run_id: str,
         expected_count: int,
-        event_sink: EventSink,
+        run_store: MongoRunStore,
     ) -> None:
         self.completed_queue = completed_queue
         self.run_id = run_id
         self.expected_count = expected_count
-        self.event_sink = event_sink
+        self.run_store = run_store
         self._stop = Event()
         self._thread: Thread | None = None
-        self.terminal_count = 0
         self._done = Event()
+        if self._terminal_count() >= self.expected_count:
+            self._done.set()
 
     def start(self) -> None:
         self._thread = Thread(
@@ -85,7 +86,7 @@ class TerminalTap:
             channel.basic_ack(delivery_tag=tag)
             return
 
-        self.event_sink.append(
+        self.run_store.append_event(
             PipelineEvent(
                 run_id=job.run_id,
                 job_id=job.job_id,
@@ -96,7 +97,14 @@ class TerminalTap:
             ),
         )
         channel.basic_ack(delivery_tag=tag)
-
-        self.terminal_count += 1
-        if self.terminal_count >= self.expected_count:
+        if self._terminal_count() >= self.expected_count:
             self._done.set()
+
+    def _terminal_count(self) -> int:
+        return len(
+            {
+                event.job_id
+                for event in self.run_store.read_by_run_id(self.run_id)
+                if event.event == EventKind.TERMINAL
+            },
+        )

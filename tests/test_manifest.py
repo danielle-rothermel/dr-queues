@@ -1,7 +1,5 @@
 from dr_queues.manifest.manifest import (
-    load_run_manifest,
     parse_workers_arg,
-    write_run_manifest,
 )
 from dr_queues.workflow.definition import (
     PipelineDefinition,
@@ -19,7 +17,7 @@ def test_parse_workers_arg() -> None:
     assert result == {"slow": 4, "transform": 2, "finalize": 10}
 
 
-def test_manifest_roundtrip(tmp_path) -> None:
+def test_manifest_roundtrip_json() -> None:
     from dr_queues.manifest.manifest import RunManifest, RunStageManifest
 
     definition = PipelineDefinition(
@@ -29,7 +27,6 @@ def test_manifest_roundtrip(tmp_path) -> None:
     )
     manifest = RunManifest(
         run_id="run-abc",
-        pipeline_id="demo",
         pipeline_definition=definition,
         expected_jobs=2,
         queue_prefix="run.run-abc",
@@ -44,7 +41,6 @@ def test_manifest_roundtrip(tmp_path) -> None:
             ),
         ],
     )
-    path = tmp_path / "manifest.json"
-    write_run_manifest(path, manifest)
-    loaded = load_run_manifest(path)
+    loaded = RunManifest.model_validate_json(manifest.model_dump_json())
     assert loaded == manifest
+    assert loaded.pipeline_id == "demo"

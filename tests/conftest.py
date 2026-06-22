@@ -8,7 +8,7 @@ import pytest
 from dr_queues.amqp.connection import open_connection
 from dr_queues.demo_handlers import registry as demo_registry
 from dr_queues.events.memory import MemoryEventSink
-from dr_queues.events.mongo import MongoEventSink
+from dr_queues.runtime import MongoRunStore
 from dr_queues.workflow.definition import (
     PipelineDefinition,
     PipelineLane,
@@ -52,15 +52,22 @@ def memory_sink() -> MemoryEventSink:
 
 
 @pytest.fixture
-def mongo_sink(mongodb_available: bool) -> MongoEventSink:
+def mongo_run_store(mongodb_available: bool) -> MongoRunStore:
     if not mongodb_available:
         pytest.skip("MongoDB not available")
-    sink = MongoEventSink(
-        collection_name=f"test_{uuid4().hex[:8]}",
+    suffix = uuid4().hex[:8]
+    store = MongoRunStore(
+        events_collection_name=f"test_events_{suffix}",
+        manifests_collection_name=f"test_manifests_{suffix}",
+        seed_batches_collection_name=f"test_seed_batches_{suffix}",
+        workers_collection_name=f"test_workers_{suffix}",
     )
-    yield sink
-    sink._collection.drop()
-    sink.close()
+    yield store
+    store._events.drop()
+    store._manifests.drop()
+    store._seed_batches.drop()
+    store._workers.drop()
+    store.close()
 
 
 @pytest.fixture

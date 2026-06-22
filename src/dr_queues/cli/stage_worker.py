@@ -3,41 +3,20 @@ from __future__ import annotations
 import importlib
 import os
 import signal
-import sys
 import time
-from pathlib import Path
+from threading import Event, Thread
 
 import typer
 
-from dr_queues.events.mongo import MongoEventSink
-from dr_queues.manifest import (
-    load_run_manifest,
-    manifest_path,
-    read_pid,
-    remove_pid,
-    stage_pid_path,
-    write_pid,
-)
 from dr_queues.pipeline.workers import WorkerPool
+from dr_queues.runtime.lifecycle import current_host
+from dr_queues.runtime.models import WorkerProcessRecord, WorkerStatus
+from dr_queues.runtime.store import MongoRunStore
 from dr_queues.workflow.pipeline import Pipeline
 from dr_queues.workflow.registry import HandlerRegistry
 
 app = typer.Typer(add_completion=False)
-
-
-def _stop_pid(pid: int, *, timeout: float = 30.0) -> None:
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(0.2)
+HEARTBEAT_INTERVAL_SECONDS = 2.0
 
 
 def _load_registry(module_path: str) -> HandlerRegistry:
@@ -51,27 +30,16 @@ def _load_registry(module_path: str) -> HandlerRegistry:
 
 @app.command()
 def main(
-    run_id: str | None = typer.Option(None, "--run-id"),
+    run_id: str = typer.Option(..., "--run-id"),
     stage: str = typer.Option(..., "--stage"),
     workers: int = typer.Option(..., "--workers"),
-    manifest: Path | None = typer.Option(None, "--manifest"),
     handlers_module: str = typer.Option(
         "dr_queues.demo_handlers",
         "--handlers-module",
     ),
-    replace: bool = typer.Option(False, "--replace"),
 ) -> None:
-    resolved_manifest_path = manifest or (
-        manifest_path(run_id) if run_id else None
-    )
-    if resolved_manifest_path is None or not resolved_manifest_path.exists():
-        typer.echo(
-            "Manifest not found. Pass --manifest or --run-id.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    run_manifest = load_run_manifest(resolved_manifest_path)
+    run_store = MongoRunStore()
+    run_manifest = run_store.get_manifest(run_id)
     stage_entry = next(
         (item for item in run_manifest.stages if item.name == stage),
         None,
@@ -80,31 +48,40 @@ def main(
         typer.echo(f"Unknown stage {stage!r} in manifest.", err=True)
         raise typer.Exit(code=1)
 
-    pid_path = stage_pid_path(run_manifest.run_id, stage)
-    if replace:
-        existing_pid = read_pid(pid_path)
-        if existing_pid is not None:
-            typer.echo(f"Stopping existing worker pid={existing_pid}...")
-            _stop_pid(existing_pid)
-            remove_pid(pid_path)
-
     registry = _load_registry(handlers_module)
     pipeline = Pipeline(run_manifest.pipeline_definition, registry)
     handler = pipeline.make_handler(stage_entry.step_index)
-    event_sink = MongoEventSink()
     pool = WorkerPool(
         input_queue=stage_entry.input_queue,
         output_queue=stage_entry.output_queue,
         handler=handler,
-        event_sink=event_sink,
+        event_sink=run_store,
         workers=workers,
         stage_name=stage_entry.name,
     )
 
-    write_pid(pid_path, os.getpid())
-    typer.echo(
-        f"stage={stage} workers={workers} input={stage_entry.input_queue}",
+    record = run_store.register_worker(
+        WorkerProcessRecord(
+            run_id=run_id,
+            stage=stage,
+            pid=os.getpid(),
+            host=current_host(),
+            workers=workers,
+            handlers_module=handlers_module,
+        ),
     )
+    typer.echo(
+        f"worker_id={record.worker_id} stage={stage} "
+        f"workers={workers} input={stage_entry.input_queue}",
+    )
+    heartbeat_stop = Event()
+    heartbeat = Thread(
+        target=_heartbeat_loop,
+        args=(run_store, record.worker_id, pool, heartbeat_stop),
+        daemon=True,
+        name=f"heartbeat-{record.worker_id}",
+    )
+    heartbeat.start()
 
     def _shutdown(_signum: int, _frame: object) -> None:
         typer.echo(f"Stopping stage {stage}...")
@@ -115,13 +92,27 @@ def main(
 
     pool.start()
     try:
-        while not pool._stop.is_set():
+        while not pool.is_stopped:
             time.sleep(0.5)
     finally:
+        heartbeat_stop.set()
         pool.stop()
         pool.join(timeout=5)
-        event_sink.close()
-        remove_pid(pid_path)
+        run_store.mark_worker_stopped(record.worker_id)
+        run_store.close()
+
+
+def _heartbeat_loop(
+    run_store: MongoRunStore,
+    worker_id: str,
+    pool: WorkerPool,
+    stop: Event,
+) -> None:
+    while not stop.wait(HEARTBEAT_INTERVAL_SECONDS):
+        record = run_store.heartbeat_worker(worker_id)
+        if record is not None and record.status == WorkerStatus.STOP_REQUESTED:
+            pool.stop()
+            return
 
 
 def run() -> None:

@@ -4,7 +4,7 @@ from dr_queues.events.schema import EventKind, filter_run_events
 from dr_queues.manifest.manifest import parse_workers_arg
 from dr_queues.pipeline.runner import (
     run_in_process,
-    seed_manifest_jobs,
+    seed_run,
     setup_run_queues,
 )
 
@@ -13,7 +13,7 @@ from dr_queues.pipeline.runner import (
 @pytest.mark.usefixtures("rabbitmq_connection")
 def test_pipeline_with_mongo_sink(
     mongodb_available,
-    mongo_sink,
+    mongo_run_store,
     tiny_pipeline,
     unique_run_id,
 ) -> None:
@@ -32,20 +32,21 @@ def test_pipeline_with_mongo_sink(
         run_id=unique_run_id,
         workers_by_stage=workers_by_stage,
         expected_jobs=expected,
+        run_store=mongo_run_store,
     )
     jobs = tiny_pipeline.make_seed_jobs(run_id=unique_run_id, repeats=repeats)
-    seed_manifest_jobs(manifest, jobs)
+    seed_run(manifest, jobs, run_store=mongo_run_store)
 
     run_in_process(
         manifest=manifest,
         pipeline=tiny_pipeline,
         workers_by_stage=workers_by_stage,
-        event_sink=mongo_sink,
+        run_store=mongo_run_store,
         completion_timeout=60.0,
     )
 
     events = filter_run_events(
-        mongo_sink.read_by_run_id(unique_run_id),
+        mongo_run_store.read_by_run_id(unique_run_id),
         unique_run_id,
     )
     assert (
