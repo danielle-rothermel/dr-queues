@@ -35,7 +35,13 @@ def start_stage_workers(
         "--handlers-module",
         handlers_module,
     ]
-    return subprocess.Popen(cmd)
+    return subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 def replace_stage_workers(

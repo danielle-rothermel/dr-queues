@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 from dr_queues.amqp.connection import ChannelSession
 from dr_queues.manifest.manifest import RunManifest
@@ -12,6 +13,9 @@ from dr_queues.runtime.models import (
     WaitTarget,
 )
 from dr_queues.runtime.store import MongoRunStore
+
+if TYPE_CHECKING:
+    from dr_queues.pipeline.tap import TerminalTap
 
 POLL_INTERVAL_SECONDS = 1.0
 
@@ -100,15 +104,30 @@ def wait_for_run(
     store = run_store or MongoRunStore()
     close_store = run_store is None
     started = time.monotonic()
+    tap: TerminalTap | None = None
     try:
         while True:
             status = get_run_status(run_id, run_store=store)
             if _target_complete(status, target):
                 return status
+            if target == WaitTarget.TERMINAL and tap is None:
+                from dr_queues.pipeline.tap import TerminalTap
+
+                final_stage = status.manifest.stages[-1]
+                tap = TerminalTap(
+                    completed_queue=final_stage.output_queue,
+                    run_id=run_id,
+                    expected_count=status.expected_jobs,
+                    run_store=store,
+                )
+                tap.start()
             if timeout is not None and time.monotonic() - started >= timeout:
                 return status
             time.sleep(poll_interval)
     finally:
+        if tap is not None:
+            tap.stop()
+            tap.join(timeout=5)
         if close_store:
             store.close()
 

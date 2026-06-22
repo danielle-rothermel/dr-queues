@@ -16,12 +16,17 @@ from dr_queues.runtime import (
     stop_workers,
     wait_for_run,
 )
+from dr_queues.runtime.models import WorkerStatus
 from dr_queues.workflow.definition import PipelineDefinition
 from dr_queues.workflow.pipeline import Pipeline
 from dr_queues.workflow.registry import HandlerRegistry
 
 app = typer.Typer(add_completion=False)
 DEFAULT_HANDLERS_MODULE = "dr_queues.demo_handlers"
+ACTIVE_WORKER_STATUSES = {
+    WorkerStatus.RUNNING,
+    WorkerStatus.STOP_REQUESTED,
+}
 
 
 @app.command()
@@ -85,11 +90,16 @@ def status(
         f"{run_status.expected_jobs}",
     )
     for stage in run_status.stages:
+        active_workers = [
+            worker
+            for worker in stage.workers
+            if worker.status in ACTIVE_WORKER_STATUSES
+        ]
         typer.echo(
             f"stage={stage.stage} completed={stage.completed_jobs}/"
             f"{stage.expected_jobs} input_depth={stage.input_queue.ready_messages} "
             f"output_depth={stage.output_queue.ready_messages} "
-            f"workers={len(stage.workers)}",
+            f"workers={len(active_workers)} records={len(stage.workers)}",
         )
 
 
@@ -101,6 +111,11 @@ def wait(
 ) -> None:
     run_status = wait_for_run(run_id, target=target, timeout=timeout)
     if target == "terminal" and not run_status.is_complete:
+        typer.echo(
+            f"run_id={run_id} target={target} incomplete terminals="
+            f"{run_status.terminal_jobs}/{run_status.expected_jobs}",
+            err=True,
+        )
         raise typer.Exit(code=1)
     typer.echo(
         f"run_id={run_id} target={target} terminals="

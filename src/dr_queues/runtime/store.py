@@ -240,7 +240,7 @@ class MongoRunStore:
     ) -> list[WorkerProcessRecord]:
         query: dict[str, Any] = {
             "run_id": run_id,
-            "status": {"$in": [WorkerStatus.RUNNING, WorkerStatus.STALE]},
+            "status": WorkerStatus.RUNNING,
         }
         if worker_id is not None:
             query["worker_id"] = worker_id
