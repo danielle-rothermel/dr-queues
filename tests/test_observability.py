@@ -9,7 +9,8 @@ from dr_queues.runtime.models import (
     JobStateStatus,
     RunHealth,
     RunRecord,
-    WorkerProcessRecord,
+    WorkerRecord,
+    WorkerRuntime,
     WorkerStatus,
 )
 from dr_queues.runtime.observability import (
@@ -32,7 +33,6 @@ def _manifest() -> RunManifest:
             lanes=[PipelineLane(id="lane-a")],
             steps=[PipelineStep(name="parse", handler_key="parse")],
         ),
-        expected_jobs=2,
         queue_prefix="run.run-1",
         stages=[
             RunStageManifest(
@@ -120,20 +120,22 @@ def test_build_run_summary_counts_terminal_and_workers() -> None:
         metadata={"owner": "demo"},
     )
     workers = [
-        WorkerProcessRecord(
+        WorkerRecord(
             run_id="run-1",
             stage="parse",
             pid=100,
             host="local",
-            workers=2,
+            concurrency=2,
+            runtime=WorkerRuntime.IN_PROCESS,
             handlers_module="handlers",
         ),
-        WorkerProcessRecord(
+        WorkerRecord(
             run_id="run-1",
             stage="parse",
             pid=101,
             host="local",
-            workers=1,
+            concurrency=1,
+            runtime=WorkerRuntime.DETACHED,
             handlers_module="handlers",
             status=WorkerStatus.STALE,
         ),
@@ -147,6 +149,7 @@ def test_build_run_summary_counts_terminal_and_workers() -> None:
         ],
         workers=workers,
         partitions=["default"],
+        expected_jobs=2,
     )
 
     assert summary.pipeline_id == "demo"
@@ -154,6 +157,30 @@ def test_build_run_summary_counts_terminal_and_workers() -> None:
     assert summary.active_workers == 1
     assert summary.stale_workers == 1
     assert summary.metadata == {"owner": "demo"}
+
+
+def test_build_run_summary_uses_expected_jobs_for_completion_health() -> None:
+    record = RunRecord(
+        run_id="run-1",
+        manifest=_manifest(),
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:01+00:00",
+    )
+
+    summary = build_run_summary(
+        record=record,
+        job_states=[
+            _job_state(job_id="job-1", status=JobStateStatus.TERMINAL),
+            _job_state(job_id="job-2", status=JobStateStatus.TERMINAL),
+        ],
+        workers=[],
+        partitions=["default"],
+        expected_jobs=3,
+    )
+
+    assert summary.terminal_jobs == 2
+    assert summary.expected_jobs == 3
+    assert summary.health == RunHealth.RUNNING
 
 
 def test_blocked_job_states_returns_newest_blocked_states() -> None:

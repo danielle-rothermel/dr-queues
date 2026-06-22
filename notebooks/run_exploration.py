@@ -78,9 +78,11 @@ def _(run_id_input):
 def _(run_id, store):
     manifest = None
     manifest_error = None
+    expected_jobs = None
     if store is not None and run_id:
         try:
             manifest = store.get_manifest(run_id)
+            expected_jobs = store.expected_job_count(run_id)
         except RunNotFoundError as error:
             manifest_error = str(error)
     mo.md(
@@ -89,7 +91,7 @@ def _(run_id, store):
         else (
             f"Pipeline `{manifest.pipeline_id}`, "
             f"{len(manifest.stages)} stages, "
-            f"expecting {manifest.expected_jobs} jobs."
+            f"expecting {expected_jobs} jobs."
             if manifest is not None
             else "_No run resolved yet._"
         )
@@ -135,7 +137,9 @@ def _(manifest, run_id, store):
                     mo.md(
                         f"### `{run_id}` — "
                         f"{_status.terminal_jobs}/{_status.expected_jobs} "
-                        f"terminal · {len(_status.workers)} workers"
+                        f"terminal · {len(_status.workers)} worker records · "
+                        f"{sum(_worker.concurrency for _worker in _status.workers)} "
+                        "concurrency"
                     ),
                     mo.ui.table(_rows, selection=None),
                 ]

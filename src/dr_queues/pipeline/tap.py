@@ -24,18 +24,16 @@ class TerminalTap:
         completed_queue: str,
         completed_queues: list[str] | None = None,
         run_id: str,
-        expected_count: int,
         run_store: MongoRunStore,
     ) -> None:
         self.completed_queue = completed_queue
         self.completed_queues = completed_queues or [completed_queue]
         self.run_id = run_id
-        self.expected_count = expected_count
         self.run_store = run_store
         self._stop = Event()
         self._thread: Thread | None = None
         self._done = Event()
-        if self._terminal_count() >= self.expected_count:
+        if self._terminal_count() >= self._expected_count():
             self._done.set()
 
     def start(self) -> None:
@@ -105,7 +103,7 @@ class TerminalTap:
             queue_name=getattr(method, "routing_key", self.completed_queue),
         )
         channel.basic_ack(delivery_tag=tag)
-        if self._terminal_count() >= self.expected_count:
+        if self._terminal_count() >= self._expected_count():
             self._done.set()
 
     def _terminal_count(self) -> int:
@@ -116,3 +114,6 @@ class TerminalTap:
                 if event.event == EventKind.TERMINAL
             },
         )
+
+    def _expected_count(self) -> int:
+        return self.run_store.expected_job_count(self.run_id)

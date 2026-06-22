@@ -47,7 +47,7 @@ dr-queues uses RabbitMQ and MongoDB for different jobs:
   depth. Jobs with target tags can be routed through partition-specific queues
   so workers can consume only matching target subsets.
 - **MongoDB** is the persistence and query layer. It owns run manifests,
-  seed-batch records, pipeline events, detached worker process records, latest
+  seed-batch records, pipeline events, worker records, latest
   per-job runtime state, failure attempt history, and target holds.
 
 There is no filesystem-backed runtime store. New runs should not create
@@ -118,7 +118,7 @@ On success you should see output like `events=70 terminals=10` for
 ### Inspect MongoDB runtime state
 
 Run manifests live in `run_manifests`, events in `pipeline_events`, seed
-batches in `seed_batches`, worker records in `worker_processes`, latest job
+batches in `seed_batches`, worker records in `workers`, latest job
 state in `job_states`, failure attempt history in `job_attempts`, and target
 holds in `target_holds`. Replace `YOUR_RUN_ID` with the `run_id` printed by the
 demo.
@@ -158,12 +158,13 @@ dr-queues-run status --run-id YOUR_RUN_ID
 dr-queues-run wait --run-id YOUR_RUN_ID --target terminal --timeout 120
 ```
 
-`status` combines Mongo progress records with RabbitMQ queue snapshots. Stage
-lines report active worker process records separately from total persisted
-records:
+`status` combines Mongo progress records with RabbitMQ queue snapshots. Expected
+job totals are derived from active seed batches, so adding more seed work to a
+run updates progress automatically. Stage lines report active worker records
+separately from active concurrency:
 
 ```text
-stage=transform completed=10/10 input_depth=0 output_depth=0 workers=1 records=3
+stage=transform completed=10/10 input_depth=0 output_depth=0 worker_records=1/3 worker_concurrency=5
 ```
 
 If counts are zero, check that MongoDB is running and that you used the actual
@@ -221,15 +222,16 @@ per-stage timing, and live queue depths.
 Import from `dr_queues`:
 
 - **Setup / run:** `setup_run_queues`, `seed_run`, `run_in_process`
-- **Runtime:** `MongoRunStore`, `get_run_status`, `wait_for_run`, `WorkerPool`, `TerminalTap`, `JobEnvelope`
+- **Runtime:** `MongoRunStore`, `get_run_status`, `wait_for_run`, `WorkerPool`, `TerminalTap`, `JobEnvelope`, `WorkerRecord`, `WorkerRuntime`
 - **Failure controls:** `JobState`, `JobStateStatus`, `JobAttempt`, `JobAttemptAction`, `TargetHold`, `TargetSelector`
 - **Workflow:** `PipelineDefinition`, `HandlerRegistry`, `Pipeline`
 - **Events:** `PipelineEvent`, `filter_run_events`
 
 ## Detached stage workers
 
-Detached workers are controlled through Mongo worker records plus OS process
-signals on the local host. Start a single stage in a separate process:
+In-process and detached workers both create Mongo worker records. Detached
+workers are also controlled through OS process signals on the local host. Start
+a single stage in a separate process:
 
 ```bash
 dr-queues-stage-worker \
@@ -333,7 +335,7 @@ provider throttling yet.
 
 See [`docs/manual_runtime_testing.md`](docs/manual_runtime_testing.md) for the
 manual operational test log covering detached startup, scale up/down,
-kill/restart recovery, duplicate seed protection, filesystem persistence
+kill/restart recovery, duplicate job protection, filesystem persistence
 checks, target-scoped workers, holds, retries, dead letters, and replay.
 See [`docs/design/failure_persistence.md`](docs/design/failure_persistence.md)
 for the current failure persistence design.

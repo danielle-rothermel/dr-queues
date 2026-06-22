@@ -77,7 +77,8 @@ def _():
     | Where is each job *now*? | `job_states` | current state |
     | What *happened*, in order? | `pipeline_events` | history |
     | What *went wrong*? | `job_attempts` | failures |
-    | Who is processing? | `worker_processes` | operational |
+    | How much work was submitted? | `seed_batches` | operational |
+    | Who is processing? | `workers` | operational |
     | What is paused? | `target_holds` | operational |
 
     Live queue depth (ready messages, consumers) comes from **RabbitMQ**,
@@ -227,6 +228,7 @@ def _(run_id, store):
         _events = store.read_by_run_id(run_id)
         _progress = EventProgress.from_events(_events)
         _manifest = store.get_manifest(run_id)
+        _expected_jobs = store.expected_job_count(run_id)
         _rows = [
             {
                 "stage": _stage.name,
@@ -242,7 +244,7 @@ def _(run_id, store):
                 mo.md(
                     f"### `{run_id}` — "
                     f"{len(_progress.terminal_jobs)}/"
-                    f"{_manifest.expected_jobs} jobs terminal"
+                    f"{_expected_jobs} jobs terminal"
                 ),
                 mo.ui.table(_rows, selection=None),
             ]
@@ -369,7 +371,7 @@ def _(mongo_db, run_id, store):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    ### "Who's working?" → workers (`worker_processes`)
+    ### "Who's working?" → workers (`workers`)
 
     `list_workers` also performs light housekeeping — it flips workers
     whose heartbeat is older than 30s to `stale`. That is the only write
@@ -385,12 +387,14 @@ def _(run_id, store):
     else:
         _workers = store.list_workers(run_id)
         if not _workers:
-            _out = mo.md(f"### `{run_id}` — no worker processes registered")
+            _out = mo.md(f"### `{run_id}` — no workers registered")
         else:
             _rows = [
                 {
                     "worker_id": _worker.worker_id[:8],
                     "stage": _worker.stage,
+                    "runtime": _worker.runtime.value,
+                    "concurrency": _worker.concurrency,
                     "pid": _worker.pid,
                     "host": _worker.host,
                     "status": _worker.status.value,

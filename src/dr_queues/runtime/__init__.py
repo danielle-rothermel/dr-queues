@@ -20,7 +20,8 @@ from dr_queues.runtime.models import (
     SeedBatchStatus,
     StageRunStatus,
     TargetHold,
-    WorkerProcessRecord,
+    WorkerRecord,
+    WorkerRuntime,
     WorkerStatus,
 )
 from dr_queues.runtime.observability import (
@@ -30,7 +31,8 @@ from dr_queues.runtime.observability import (
 )
 from dr_queues.runtime.status import get_run_status, wait_for_run
 from dr_queues.runtime.store import (
-    DuplicateSeedError,
+    DuplicateJobError,
+    InvalidSeedJobError,
     ManifestMismatchError,
     MongoRunStore,
     RunAlreadyExistsError,
@@ -44,7 +46,8 @@ from dr_queues.targeting import (
 )
 
 __all__ = [
-    "DuplicateSeedError",
+    "DuplicateJobError",
+    "InvalidSeedJobError",
     "JobAttempt",
     "JobAttemptAction",
     "JobState",
@@ -64,7 +67,8 @@ __all__ = [
     "StageRunStatus",
     "TargetHold",
     "TargetSelector",
-    "WorkerProcessRecord",
+    "WorkerRecord",
+    "WorkerRuntime",
     "WorkerStartError",
     "WorkerStatus",
     "build_run_summary",

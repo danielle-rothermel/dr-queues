@@ -177,20 +177,21 @@ Actions taken:
 
 - None beyond the fixes already listed above.
 
-## Duplicate Seed Guard
+## Duplicate Job Guard
 
 What tested:
 
-- Attempted to seed `manual-20260622-kill` a second time without `force=True`.
+- Attempted to seed `manual-20260622-kill` again with a job ID already present
+  in an active seed batch.
 
 Why:
 
-- Verify Mongo seed-batch state prevents accidental duplicate publishing.
+- Verify Mongo seed-batch state prevents accidental duplicate job publishing
+  while still allowing additional seed batches for new jobs.
 
 What happened:
 
-- The second seed attempt failed with
-  `DuplicateSeedError Run 'manual-20260622-kill' already has a seed batch.`
+- The duplicate job attempt failed with `DuplicateJobError`.
 
 Actions taken:
 

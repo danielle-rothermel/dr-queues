@@ -31,7 +31,6 @@ def test_pipeline_with_mongo_sink(
         pipeline=tiny_pipeline,
         run_id=unique_run_id,
         workers_by_stage=workers_by_stage,
-        expected_jobs=expected,
         run_store=mongo_run_store,
     )
     jobs = tiny_pipeline.make_seed_jobs(run_id=unique_run_id, repeats=repeats)

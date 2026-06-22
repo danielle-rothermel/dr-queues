@@ -19,7 +19,8 @@ from dr_queues.runtime.models import (
     RunStatus,
     StageRunStatus,
     TargetHold,
-    WorkerProcessRecord,
+    WorkerRecord,
+    WorkerRuntime,
 )
 from dr_queues.runtime.store import RunNotFoundError
 from dr_queues.targeting import TargetSelector
@@ -39,7 +40,6 @@ def _manifest() -> RunManifest:
             lanes=[PipelineLane(id="lane-a")],
             steps=[PipelineStep(name="parse", handler_key="parse")],
         ),
-        expected_jobs=1,
         queue_prefix="run.run-1",
         stages=[
             RunStageManifest(
@@ -163,18 +163,23 @@ class FakeStore:
         *,
         stage: str | None = None,
         include_stopped: bool = True,
-    ) -> list[WorkerProcessRecord]:
+    ) -> list[WorkerRecord]:
         _ = include_stopped
         return [
-            WorkerProcessRecord(
+            WorkerRecord(
                 run_id=run_id,
                 stage=stage or "parse",
                 pid=123,
                 host="local",
-                workers=1,
+                concurrency=1,
+                runtime=WorkerRuntime.IN_PROCESS,
                 handlers_module="handlers",
             )
         ]
+
+    def expected_job_count(self, run_id: str) -> int:
+        assert run_id
+        return 1
 
     def list_run_partitions(self, run_id: str) -> list[str]:
         assert run_id

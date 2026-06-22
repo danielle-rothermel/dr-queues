@@ -266,7 +266,7 @@ function renderWorkers(workers) {
     ["stage", (worker) => worker.stage],
     ["status", (worker) => worker.status],
     ["pid", (worker) => String(worker.pid)],
-    ["workers", (worker) => String(worker.workers)],
+    ["concurrency", (worker) => String(worker.concurrency)],
     ["selectors", selectorsForWorker],
   ]);
 }

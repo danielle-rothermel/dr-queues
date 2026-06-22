@@ -29,6 +29,11 @@ class WorkerStatus(StrEnum):
     STALE = "stale"
 
 
+class WorkerRuntime(StrEnum):
+    IN_PROCESS = "in_process"
+    DETACHED = "detached"
+
+
 class WaitTarget(StrEnum):
     TERMINAL = "terminal"
 
@@ -71,13 +76,14 @@ class SeedBatch(BaseModel):
     failure_detail: str | None = None
 
 
-class WorkerProcessRecord(BaseModel):
+class WorkerRecord(BaseModel):
     worker_id: str = Field(default_factory=lambda: str(uuid4()))
     run_id: str
     stage: str
     pid: int
     host: str
-    workers: int
+    concurrency: int
+    runtime: WorkerRuntime
     handlers_module: str
     status: WorkerStatus = WorkerStatus.RUNNING
     started_at: str = Field(default_factory=utc_now_iso)
@@ -150,7 +156,7 @@ class StageRunStatus(BaseModel):
     in_flight_jobs: int
     input_queue: QueueSnapshot
     output_queue: QueueSnapshot
-    workers: list[WorkerProcessRecord] = Field(default_factory=list)
+    workers: list[WorkerRecord] = Field(default_factory=list)
     job_state_counts: dict[JobStateStatus, int] = Field(default_factory=dict)
 
     @property
@@ -164,7 +170,7 @@ class RunStatus(BaseModel):
     expected_jobs: int
     terminal_jobs: int
     stages: list[StageRunStatus]
-    workers: list[WorkerProcessRecord] = Field(default_factory=list)
+    workers: list[WorkerRecord] = Field(default_factory=list)
     job_state_counts: dict[JobStateStatus, int] = Field(default_factory=dict)
 
     @property

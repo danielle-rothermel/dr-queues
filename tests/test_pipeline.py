@@ -7,6 +7,7 @@ from dr_queues.pipeline.runner import (
     seed_run,
     setup_run_queues,
 )
+from dr_queues.runtime.models import WorkerStatus
 
 
 @pytest.mark.integration
@@ -27,7 +28,6 @@ def test_pipeline_in_process(
         pipeline=demo_pipeline,
         run_id=unique_run_id,
         workers_by_stage=workers_by_stage,
-        expected_jobs=expected,
         run_store=mongo_run_store,
     )
     jobs = demo_pipeline.make_seed_jobs(run_id=unique_run_id, repeats=repeats)
@@ -49,6 +49,13 @@ def test_pipeline_in_process(
         event for event in events if event.event == EventKind.TERMINAL
     ]
     assert len(terminals) == expected
+    workers = mongo_run_store.list_workers(unique_run_id)
+    assert {worker.stage for worker in workers} == {
+        "slow",
+        "transform",
+        "finalize",
+    }
+    assert {worker.status for worker in workers} == {WorkerStatus.STOPPED}
 
     terminal = terminals[0]
     assert terminal.payload["step_outputs"]["transform"].startswith(
@@ -72,7 +79,6 @@ def test_runner_setup_chains_queues(
         pipeline=demo_pipeline,
         run_id=unique_run_id,
         workers_by_stage=workers_by_stage,
-        expected_jobs=4,
         run_store=mongo_run_store,
     )
     assert len(manifest.stages) == 3

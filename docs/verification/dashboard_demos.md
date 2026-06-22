@@ -36,15 +36,14 @@ What to look for:
 - Events fill with stage started, stage completed, and terminal activity.
 - Queue depths briefly move and then drain.
 - Blocked jobs, Holds, and Attempts remain empty.
-- Workers remains empty.
+- Workers shows one in-process worker record per stage.
 
 What this taught:
 
 The dashboard can read real Mongo and RabbitMQ runtime state while a run is in
-flight. It also made an important model distinction visible: in-process demo
-workers drain real queues and emit real events, but they do not create detached
-worker process records. An empty Workers panel is therefore expected in this
-mode and is not a dashboard bug.
+flight. In-process demo workers now use the same worker-record lifecycle as
+detached workers, so the Workers panel represents runtime workers rather than
+only OS child processes.
 
 ## Demo 2: Detached workers
 
@@ -69,7 +68,7 @@ records, heartbeats, PIDs, stages, and stop transitions to display.
 What to look for:
 
 - Workers shows one row each for `slow`, `transform`, and `finalize`.
-- Worker rows include stage, status, PID, and worker count.
+- Worker rows include stage, status, PID, runtime, and concurrency.
 - Overview active worker count is nonzero while the run is active.
 - Overall progress climbs to `720/720`.
 - Stage progress advances while worker records remain visible.
@@ -79,7 +78,7 @@ What to look for:
 
 What this taught:
 
-The Workers panel is tied to detached worker registration, not queue activity
+The Workers panel is tied to runtime worker registration, not queue activity
 alone. It also showed that the dashboard can combine run progress and worker
 lifecycle state in one snapshot: the run completed at `720/720`, the worker
 records were visible while running, and all three workers were stopped cleanly.

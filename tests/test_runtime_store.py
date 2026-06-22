@@ -8,12 +8,13 @@ from dr_queues.events.schema import EventKind, PipelineEvent
 from dr_queues.manifest import RunManifest, RunStageManifest
 from dr_queues.pipeline.job import JobEnvelope
 from dr_queues.runtime import (
-    DuplicateSeedError,
+    DuplicateJobError,
     JobAttemptAction,
     JobStateStatus,
     MongoRunStore,
     RunAlreadyExistsError,
-    WorkerProcessRecord,
+    WorkerRecord,
+    WorkerRuntime,
     WorkerStatus,
 )
 from dr_queues.runtime.models import EventProgress
@@ -37,7 +38,6 @@ def _manifest(run_id: str = "run-1") -> RunManifest:
     return RunManifest(
         run_id=run_id,
         pipeline_definition=_definition(),
-        expected_jobs=2,
         queue_prefix=f"run.{run_id}",
         stages=[
             RunStageManifest(
@@ -114,13 +114,48 @@ def test_mongo_run_store_lists_run_records(
 
 
 @pytest.mark.integration
-def test_mongo_run_store_refuses_duplicate_seed_batch(
+def test_mongo_run_store_allows_multiple_seed_batches(
+    mongo_run_store: MongoRunStore,
+) -> None:
+    mongo_run_store.create_seed_batch(run_id="run-1", job_ids=["job-1"])
+    mongo_run_store.mark_seed_batch_published(
+        mongo_run_store.create_seed_batch(
+            run_id="run-1",
+            job_ids=["job-2", "job-3"],
+        ).batch_id
+    )
+
+    batches = mongo_run_store.list_seed_batches("run-1")
+
+    assert [batch.count for batch in batches] == [1, 2]
+    assert mongo_run_store.expected_job_count("run-1") == 3
+
+
+@pytest.mark.integration
+def test_mongo_run_store_refuses_duplicate_seed_job_ids(
     mongo_run_store: MongoRunStore,
 ) -> None:
     mongo_run_store.create_seed_batch(run_id="run-1", job_ids=["job-1"])
 
-    with pytest.raises(DuplicateSeedError):
-        mongo_run_store.create_seed_batch(run_id="run-1", job_ids=["job-2"])
+    with pytest.raises(DuplicateJobError):
+        mongo_run_store.create_seed_batch(run_id="run-1", job_ids=["job-1"])
+
+
+@pytest.mark.integration
+def test_mongo_run_store_excludes_failed_seed_batches_from_expected_count(
+    mongo_run_store: MongoRunStore,
+) -> None:
+    first = mongo_run_store.create_seed_batch(
+        run_id="run-1", job_ids=["job-1"]
+    )
+    second = mongo_run_store.create_seed_batch(
+        run_id="run-1",
+        job_ids=["job-2"],
+    )
+    mongo_run_store.mark_seed_batch_published(first.batch_id)
+    mongo_run_store.mark_seed_batch_failed(second.batch_id, "failed")
+
+    assert mongo_run_store.expected_job_count("run-1") == 1
 
 
 @pytest.mark.integration
@@ -128,12 +163,13 @@ def test_mongo_run_store_worker_stop_transition(
     mongo_run_store: MongoRunStore,
 ) -> None:
     record = mongo_run_store.register_worker(
-        WorkerProcessRecord(
+        WorkerRecord(
             run_id="run-1",
             stage="parse",
             pid=os.getpid(),
             host="localhost",
-            workers=2,
+            concurrency=2,
+            runtime=WorkerRuntime.DETACHED,
             handlers_module="handlers",
         ),
     )

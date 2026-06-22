@@ -13,7 +13,7 @@ from dr_queues.runtime.models import (
     RunRecord,
     RunStatus,
     RunSummary,
-    WorkerProcessRecord,
+    WorkerRecord,
     WorkerStatus,
     count_job_states,
 )
@@ -52,6 +52,7 @@ def list_run_summaries(
             job_states=run_store.list_job_states(record.run_id),
             workers=run_store.list_workers(record.run_id),
             partitions=run_store.list_run_partitions(record.run_id),
+            expected_jobs=run_store.expected_job_count(record.run_id),
         )
         for record in run_store.list_runs(limit=limit)
     ]
@@ -73,6 +74,7 @@ def get_run_observation(
         job_states=job_states,
         workers=workers,
         partitions=partitions,
+        expected_jobs=run_store.expected_job_count(run_id),
     )
     status = (
         status_getter(run_id)
@@ -101,8 +103,9 @@ def build_run_summary(
     *,
     record: RunRecord,
     job_states: list[JobState],
-    workers: list[WorkerProcessRecord],
+    workers: list[WorkerRecord],
     partitions: list[str],
+    expected_jobs: int,
 ) -> RunSummary:
     job_state_counts = count_job_states(job_states)
     terminal_jobs = job_state_counts[JobStateStatus.TERMINAL]
@@ -115,7 +118,7 @@ def build_run_summary(
         pipeline_id=record.manifest.pipeline_id,
         created_at=record.created_at,
         updated_at=record.updated_at,
-        expected_jobs=record.manifest.expected_jobs,
+        expected_jobs=expected_jobs,
         terminal_jobs=terminal_jobs,
         stage_names=[stage.name for stage in record.manifest.stages],
         partitions=partitions,
@@ -123,7 +126,7 @@ def build_run_summary(
         active_workers=active_workers,
         stale_workers=stale_workers,
         health=derive_run_health(
-            expected_jobs=record.manifest.expected_jobs,
+            expected_jobs=expected_jobs,
             terminal_jobs=terminal_jobs,
             job_state_counts=job_state_counts,
             stale_workers=stale_workers,
@@ -174,7 +177,7 @@ def blocked_job_states(
 
 
 def _count_workers(
-    workers: list[WorkerProcessRecord],
+    workers: list[WorkerRecord],
     status: WorkerStatus,
 ) -> int:
     return sum(1 for worker in workers if worker.status == status)
