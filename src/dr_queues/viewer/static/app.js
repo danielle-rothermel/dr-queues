@@ -192,6 +192,12 @@ function renderOverview(summary) {
     ["Partitions", String(summary.partitions.length), ""],
   ];
   nodes.overview.replaceChildren(
+    progressStrip(
+      "Overall progress",
+      summary.terminal_jobs,
+      summary.expected_jobs,
+      "overall-progress",
+    ),
     ...metrics.map(([label, value, className]) => metric(label, value, className)),
   );
 }
@@ -217,6 +223,14 @@ function stageCard(stage) {
   const title = document.createElement("h3");
   title.textContent = stage.stage;
   card.append(title);
+  card.append(
+    progressStrip(
+      "Finished",
+      stage.completed_jobs,
+      stage.expected_jobs,
+      "stage-progress",
+    ),
+  );
   card.append(
     row("completed", `${stage.completed_jobs}/${stage.expected_jobs}`, "count-row"),
     row("in flight", String(stage.in_flight_jobs), "count-row"),
@@ -338,6 +352,44 @@ function metric(label, value, className) {
   }
   node.append(labelNode, valueNode);
   return node;
+}
+
+function progressStrip(label, completed, expected, className) {
+  const percent = progressPercent(completed, expected);
+  const node = document.createElement("div");
+  node.className = `progress-strip ${className}`;
+
+  const header = document.createElement("div");
+  header.className = "progress-header";
+  const labelNode = document.createElement("span");
+  labelNode.textContent = label;
+  const percentNode = document.createElement("strong");
+  percentNode.textContent = `${percent}%`;
+  header.append(labelNode, percentNode);
+
+  const track = document.createElement("div");
+  track.className = "progress-track";
+  track.setAttribute("role", "progressbar");
+  track.setAttribute("aria-label", label);
+  track.setAttribute("aria-valuemin", "0");
+  track.setAttribute("aria-valuemax", "100");
+  track.setAttribute("aria-valuenow", String(percent));
+
+  const fill = document.createElement("div");
+  fill.className = "progress-fill";
+  fill.style.width = `${percent}%`;
+  track.append(fill);
+
+  node.append(header, track);
+  return node;
+}
+
+function progressPercent(completed, expected) {
+  if (expected <= 0) {
+    return 0;
+  }
+  const percent = Math.round((completed / expected) * 100);
+  return Math.max(0, Math.min(100, percent));
 }
 
 function row(label, value, className) {

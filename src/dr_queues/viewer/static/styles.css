@@ -242,6 +242,53 @@ select {
   overflow: hidden;
 }
 
+.progress-strip {
+  display: grid;
+  gap: 8px;
+}
+
+.overall-progress {
+  grid-column: 1 / -1;
+  padding: 16px;
+  background: #fbfaf7;
+}
+
+.stage-progress {
+  margin-bottom: 12px;
+}
+
+.progress-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.progress-header span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.progress-header strong {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 14px;
+}
+
+.progress-track {
+  height: 9px;
+  overflow: hidden;
+  border: 1px solid rgba(47, 111, 159, 0.24);
+  border-radius: 999px;
+  background: #ece6d8;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--blue), var(--green));
+}
+
 .metric {
   min-height: 92px;
   padding: 16px;

@@ -337,5 +337,8 @@ def test_viewer_serves_static_assets(client: TestClient) -> None:
     assert script.status_code == 200
     assert "REFRESH_RATE_STORAGE_KEY" in script.text
     assert "refreshInFlight" in script.text
+    assert "progressPercent" in script.text
+    assert "Overall progress" in script.text
     assert stylesheet.status_code == 200
     assert ".refresh-control" in stylesheet.text
+    assert ".progress-track" in stylesheet.text
