@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
 
 import dr_queues.pipeline.tap as tap_mod
@@ -22,14 +24,19 @@ class FakeTerminalMethod:
 
 class FakeChannel:
     def __init__(self) -> None:
+        self.is_open = True
         self.acked: list[int] = []
         self.nacked: list[tuple[int, bool]] = []
+        self.published: list[dict[str, Any]] = []
 
     def basic_ack(self, *, delivery_tag: int) -> None:
         self.acked.append(delivery_tag)
 
     def basic_nack(self, *, delivery_tag: int, requeue: bool) -> None:
         self.nacked.append((delivery_tag, requeue))
+
+    def basic_publish(self, **kwargs: Any) -> None:
+        self.published.append(kwargs)
 
 
 class RecordingSink:
@@ -234,6 +241,33 @@ def test_worker_nacks_when_failure_is_not_recorded() -> None:
     assert [event.event for event in sink.events] == [EventKind.STAGE_STARTED]
 
 
+def test_worker_forwards_without_declaring_queue() -> None:
+    sink = RecordingSink()
+    pool = WorkerPool(
+        input_queue="run.r.s1.pending",
+        output_queue="run.r.s1.completed",
+        handler=lambda job: job,
+        event_sink=sink,
+        stage_name="score",
+    )
+    channel = FakeChannel()
+
+    pool._on_message(channel, FakeMethod(), None, _job().to_json())
+
+    assert channel.acked == [1]
+    assert channel.nacked == []
+    assert [publish["routing_key"] for publish in channel.published] == [
+        "run.r.s1.completed"
+    ]
+    assert sink.completed == [
+        {
+            "job_id": "job-1",
+            "stage": "score",
+            "queue_name": "run.r.s1.pending",
+        }
+    ]
+
+
 def test_terminal_tap_records_terminal_through_stage_execution() -> None:
     store = TerminalRecordingStore()
     tap = TerminalTap(
@@ -319,7 +353,15 @@ def test_terminal_tap_prefetches_batch_size(monkeypatch) -> None:
             self.is_open = False
 
     connection = _Connection()
-    monkeypatch.setattr(tap_mod, "open_connection", lambda: connection)
+
+    @contextmanager
+    def _broker_session():
+        yield SimpleNamespace(
+            channel=connection.channel_instance,
+            connection=connection,
+        )
+
+    monkeypatch.setattr(tap_mod, "broker_session", _broker_session)
     store = TerminalRecordingStore(expected_jobs=0)
     tap = TerminalTap(
         completed_queue="run.r.s3.completed",

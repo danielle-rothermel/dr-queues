@@ -5,14 +5,13 @@ from threading import Event, Thread
 from typing import Any
 
 from dr_queues.amqp.connection import (
-    ChannelSession,
     PikaBlockingChannel,
     PikaDeliveryMethod,
     PikaDeliveryMode,
     delivery_tag,
-    open_connection,
-    publish_job,
 )
+from dr_queues.amqp.publish import publish_job
+from dr_queues.amqp.session import broker_session
 from dr_queues.events.sink import EventSink
 from dr_queues.pipeline.execution import (
     JobHandler,
@@ -83,22 +82,19 @@ class WorkerPool:
             thread.join(timeout=timeout)
 
     def _run_worker(self, _index: int) -> None:
-        connection = open_connection()
-        channel = connection.channel()
+        with broker_session() as broker:
+            channel = broker.channel
+            connection = broker.connection
 
-        channel.basic_qos(prefetch_count=1)
-        for queue_name in self.input_queues:
-            channel.basic_consume(
-                queue=queue_name,
-                on_message_callback=self._on_message,
-                auto_ack=False,
-            )
-        while not self._stop.is_set():
-            connection.process_data_events(time_limit=0.5)
-        if channel.is_open:
-            channel.close()
-        if connection.is_open:
-            connection.close()
+            channel.basic_qos(prefetch_count=1)
+            for queue_name in self.input_queues:
+                channel.basic_consume(
+                    queue=queue_name,
+                    on_message_callback=self._on_message,
+                    auto_ack=False,
+                )
+            while not self._stop.is_set():
+                connection.process_data_events(time_limit=0.5)
 
     def _on_message(
         self,
@@ -127,11 +123,6 @@ class WorkerPool:
         if result.should_forward:
             output_queue = self._output_queue(result.job)
             if output_queue is not None:
-                ChannelSession.declare_durable_queue(
-                    queue_name=output_queue,
-                    channel=channel,
-                    delivery_mode=self.delivery_mode,
-                )
                 publish_job(
                     channel=channel,
                     queue_name=output_queue,

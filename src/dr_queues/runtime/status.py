@@ -3,7 +3,8 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from dr_queues.amqp.connection import ChannelSession
+from dr_queues.amqp.connection import PikaBlockingChannel
+from dr_queues.amqp.session import broker_session
 from dr_queues.manifest.manifest import RunManifest
 from dr_queues.runtime.models import (
     EventProgress,
@@ -21,33 +22,35 @@ if TYPE_CHECKING:
 POLL_INTERVAL_SECONDS = 1.0
 
 
-def queue_snapshot(queue_name: str) -> QueueSnapshot:
-    session = ChannelSession.open_session()
-    try:
-        method = session.channel.queue_declare(
-            queue=queue_name,
-            passive=True,
-        )
-        ready_messages = method.method.message_count
-        consumers = method.method.consumer_count
-        if ready_messages is None or consumers is None:
-            msg = f"RabbitMQ did not return counts for queue {queue_name!r}."
-            raise RuntimeError(msg)
-        return QueueSnapshot(
-            name=queue_name,
-            ready_messages=ready_messages,
-            consumers=consumers,
-        )
-    finally:
-        session.close()
+def queue_snapshot(
+    channel: PikaBlockingChannel,
+    queue_name: str,
+) -> QueueSnapshot:
+    method = channel.queue_declare(
+        queue=queue_name,
+        passive=True,
+    )
+    ready_messages = method.method.message_count
+    consumers = method.method.consumer_count
+    if ready_messages is None or consumers is None:
+        msg = f"RabbitMQ did not return counts for queue {queue_name!r}."
+        raise RuntimeError(msg)
+    return QueueSnapshot(
+        name=queue_name,
+        ready_messages=ready_messages,
+        consumers=consumers,
+    )
 
 
 def aggregate_queue_snapshot(
+    channel: PikaBlockingChannel,
     queue_names: list[str],
     *,
     label: str,
 ) -> QueueSnapshot:
-    snapshots = [queue_snapshot(queue_name) for queue_name in queue_names]
+    snapshots = [
+        queue_snapshot(channel, queue_name) for queue_name in queue_names
+    ]
     return QueueSnapshot(
         name=label,
         ready_messages=sum(snapshot.ready_messages for snapshot in snapshots),
@@ -82,40 +85,46 @@ def build_run_status(
     partitions = run_store.list_run_partitions(manifest.run_id)
     expected_jobs = run_store.expected_job_count(manifest.run_id)
     stages: list[StageRunStatus] = []
-    for stage in manifest.stages:
-        started = progress.stage_started.get(stage.name, set())
-        completed = progress.stage_completed.get(stage.name, set())
-        stage_states = [
-            state for state in job_states if state.stage == stage.name
-        ]
-        stage_workers = [
-            worker for worker in workers if worker.stage == stage.name
-        ]
-        stages.append(
-            StageRunStatus(
-                stage=stage.name,
-                expected_jobs=expected_jobs,
-                started_jobs=len(started),
-                completed_jobs=len(completed),
-                in_flight_jobs=max(0, len(started) - len(completed)),
-                input_queue=aggregate_queue_snapshot(
-                    [
-                        manifest.stage_input_queue(stage.name, partition)
-                        for partition in partitions
-                    ],
-                    label=stage.input_queue,
+    with broker_session() as broker:
+        for stage in manifest.stages:
+            started = progress.stage_started.get(stage.name, set())
+            completed = progress.stage_completed.get(stage.name, set())
+            stage_states = [
+                state for state in job_states if state.stage == stage.name
+            ]
+            stage_workers = [
+                worker for worker in workers if worker.stage == stage.name
+            ]
+            stages.append(
+                StageRunStatus(
+                    stage=stage.name,
+                    expected_jobs=expected_jobs,
+                    started_jobs=len(started),
+                    completed_jobs=len(completed),
+                    in_flight_jobs=max(0, len(started) - len(completed)),
+                    input_queue=aggregate_queue_snapshot(
+                        broker.channel,
+                        [
+                            manifest.stage_input_queue(stage.name, partition)
+                            for partition in partitions
+                        ],
+                        label=stage.input_queue,
+                    ),
+                    output_queue=aggregate_queue_snapshot(
+                        broker.channel,
+                        [
+                            manifest.stage_output_queue(
+                                stage.name,
+                                partition,
+                            )
+                            for partition in partitions
+                        ],
+                        label=stage.output_queue,
+                    ),
+                    workers=stage_workers,
+                    job_state_counts=count_job_states(stage_states),
                 ),
-                output_queue=aggregate_queue_snapshot(
-                    [
-                        manifest.stage_output_queue(stage.name, partition)
-                        for partition in partitions
-                    ],
-                    label=stage.output_queue,
-                ),
-                workers=stage_workers,
-                job_state_counts=count_job_states(stage_states),
-            ),
-        )
+            )
     return RunStatus(
         run_id=manifest.run_id,
         manifest=manifest,

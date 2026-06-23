@@ -4,8 +4,9 @@ import subprocess
 import time
 from typing import Any
 
-from dr_queues.amqp.connection import PikaDeliveryMode
-from dr_queues.amqp.queues import build_stage_queues
+from dr_queues.amqp.queues import build_stage_queue_names
+from dr_queues.amqp.session import broker_session
+from dr_queues.amqp.topology import declare_durable_queues
 from dr_queues.cli import stage_worker_command_prefix
 from dr_queues.manifest.manifest import (
     RunManifest,
@@ -37,7 +38,6 @@ def setup_run_queues(
     pipeline: Pipeline,
     run_id: str,
     workers_by_stage: dict[str, int],
-    delivery_mode: PikaDeliveryMode = PikaDeliveryMode.PERSISTENT,
     queue_prefix: str | None = None,
     run_store: MongoRunStore | None = None,
     overwrite: bool = False,
@@ -62,18 +62,26 @@ def setup_run_queues(
         for index in range(stage_count):
             stage_prefix = f"{prefix}.s{index + 1}"
             if index == 0:
-                queues = build_stage_queues(
+                queues = build_stage_queue_names(
                     prefix=stage_prefix,
-                    delivery_mode=delivery_mode,
                 )
             else:
-                queues = build_stage_queues(
+                queues = build_stage_queue_names(
                     prefix=stage_prefix,
                     pending=previous_completed,
-                    delivery_mode=delivery_mode,
                 )
             stage_queues_list.append(queues)
             previous_completed = queues.completed_name
+
+        with broker_session() as broker:
+            declare_durable_queues(
+                broker.channel,
+                (
+                    queue_name
+                    for queues in stage_queues_list
+                    for queue_name in queues.queue_names
+                ),
+            )
 
         stages: list[RunStageManifest] = []
         for index, step in enumerate(pipeline.definition.steps):

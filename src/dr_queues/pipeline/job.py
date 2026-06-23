@@ -5,10 +5,9 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from dr_queues.amqp.connection import (
-    ChannelSession,
-    PikaDeliveryMode,
-)
+from dr_queues.amqp.connection import PikaDeliveryMode
+from dr_queues.amqp.publish import publish_messages
+from dr_queues.amqp.session import broker_session
 from dr_queues.targeting import (
     DEFAULT_PARTITION_KEY,
     derive_partition_key,
@@ -46,12 +45,10 @@ def seed_jobs(
     jobs: list[JobEnvelope],
     delivery_mode: PikaDeliveryMode = PikaDeliveryMode.PERSISTENT,
 ) -> None:
-    seed_session = ChannelSession.open_session(delivery_mode=delivery_mode)
-    try:
-        for job in jobs:
-            seed_session.publish_job(
-                queue_name=queue_name,
-                body=job.to_json(),
-            )
-    finally:
-        seed_session.close()
+    with broker_session() as broker:
+        publish_messages(
+            channel=broker.channel,
+            queue_name=queue_name,
+            bodies=(job.to_json() for job in jobs),
+            delivery_mode=delivery_mode,
+        )

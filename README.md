@@ -211,7 +211,7 @@ per-stage timing, and live queue depths.
 
 | Module | Role |
 |--------|------|
-| `amqp/` | Connection helpers, stage queue pairs |
+| `amqp/` | RabbitMQ connection/session lifecycle, topology, publishing |
 | `pipeline/` | `JobEnvelope`, `WorkerPool`, `TerminalTap`, runner |
 | `events/` | `PipelineEvent`, local test sink, event filters |
 | `manifest/` | Run manifest models and worker spec parsing |
