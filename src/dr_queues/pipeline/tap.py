@@ -8,8 +8,8 @@ from dr_queues.amqp.connection import (
     PikaBlockingChannel,
     PikaDeliveryMethod,
     delivery_tag,
-    open_connection,
 )
+from dr_queues.amqp.session import broker_session
 from dr_queues.events.schema import EventKind
 from dr_queues.pipeline.execution import StageExecution
 from dr_queues.pipeline.job import JobEnvelope
@@ -74,26 +74,25 @@ class TerminalTap:
         return self._done.wait(timeout=timeout)
 
     def _run(self) -> None:
-        connection = open_connection()
-        channel = connection.channel()
-        channel.basic_qos(prefetch_count=self.batch_size)
-        for queue_name in self.completed_queues:
-            channel.basic_consume(
-                queue=queue_name,
-                on_message_callback=self._on_message,
-                auto_ack=False,
-            )
-        next_flush_at = time.monotonic() + self.flush_interval_seconds
-        while not self._stop.is_set() and not self._done.is_set():
-            connection.process_data_events(time_limit=0.5)
-            if self._pending and time.monotonic() >= next_flush_at:
-                self._flush_pending()
-                next_flush_at = time.monotonic() + self.flush_interval_seconds
-        self._flush_pending()
-        if channel.is_open:
-            channel.close()
-        if connection.is_open:
-            connection.close()
+        with broker_session() as broker:
+            channel = broker.channel
+            connection = broker.connection
+            channel.basic_qos(prefetch_count=self.batch_size)
+            for queue_name in self.completed_queues:
+                channel.basic_consume(
+                    queue=queue_name,
+                    on_message_callback=self._on_message,
+                    auto_ack=False,
+                )
+            next_flush_at = time.monotonic() + self.flush_interval_seconds
+            while not self._stop.is_set() and not self._done.is_set():
+                connection.process_data_events(time_limit=0.5)
+                if self._pending and time.monotonic() >= next_flush_at:
+                    self._flush_pending()
+                    next_flush_at = (
+                        time.monotonic() + self.flush_interval_seconds
+                    )
+            self._flush_pending()
 
     def _on_message(
         self,

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from dr_queues.amqp.connection import ChannelSession, PikaDeliveryMode
+from dr_queues.amqp.session import broker_session
+from dr_queues.amqp.topology import declare_durable_queues
 from dr_queues.manifest.manifest import RunManifest
 from dr_queues.pipeline.job import JobEnvelope, seed_jobs
 from dr_queues.runtime.models import JobStateStatus
@@ -20,24 +21,19 @@ def publish_jobs_to_queue(queue_name: str, jobs: list[JobEnvelope]) -> None:
 def declare_partition_queues(
     manifest: RunManifest,
     partition_key: str,
-    *,
-    delivery_mode: PikaDeliveryMode = PikaDeliveryMode.PERSISTENT,
 ) -> None:
-    session = ChannelSession.open_session(delivery_mode=delivery_mode)
-    try:
-        for stage in manifest.stages:
-            ChannelSession.declare_durable_queue(
-                queue_name=stage.input_queue_for_partition(partition_key),
-                channel=session.channel,
-                delivery_mode=delivery_mode,
-            )
-            ChannelSession.declare_durable_queue(
-                queue_name=stage.output_queue_for_partition(partition_key),
-                channel=session.channel,
-                delivery_mode=delivery_mode,
-            )
-    finally:
-        session.close()
+    with broker_session() as broker:
+        declare_durable_queues(
+            broker.channel,
+            (
+                queue_name
+                for stage in manifest.stages
+                for queue_name in (
+                    stage.input_queue_for_partition(partition_key),
+                    stage.output_queue_for_partition(partition_key),
+                )
+            ),
+        )
 
 
 def seed_stage_eligible_jobs(
@@ -109,9 +105,12 @@ def _mark_pending_and_publish(
     queue_declarer: PartitionQueueDeclarer,
 ) -> None:
     jobs_by_queue: dict[str, list[JobEnvelope]] = {}
+    declared_partitions: set[str] = set()
     for stage_name, job in jobs_by_stage:
         job.resolve_partition_key()
-        queue_declarer(manifest, job.partition_key)
+        if job.partition_key not in declared_partitions:
+            queue_declarer(manifest, job.partition_key)
+            declared_partitions.add(job.partition_key)
         queue_name = manifest.stage_input_queue(stage_name, job.partition_key)
         run_store.mark_job_pending(
             job=job,
