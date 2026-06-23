@@ -35,7 +35,7 @@ BLOCKED_JOB_STATUSES = {
     JobStateStatus.DEAD_LETTERED,
 }
 
-type RunStatusGetter = Callable[
+RunStatusGetter = Callable[
     [str],
     RunStatus,
 ]

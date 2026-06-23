@@ -39,7 +39,7 @@ SERVICE_UNAVAILABLE_ERRORS = (
     pika.exceptions.AMQPError,
 )
 
-type RunStoreFactory = Callable[[], Any]
+RunStoreFactory = Callable[[], Any]
 
 
 def create_app(

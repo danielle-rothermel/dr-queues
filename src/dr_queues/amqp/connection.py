@@ -8,11 +8,11 @@ import pika.adapters.blocking_connection as pika_blocking
 
 DEFAULT_AMQP_URL = "amqp://guest:guest@localhost:5672/"
 
-type PikaBlockingChannel = pika_blocking.BlockingChannel
-type PikaBasicProperties = pika.spec.BasicProperties
-type PikaDeliveryTag = int
-type PikaDeliveryMethod = pika.spec.Basic.Deliver
-type PikaGetOkMethod = pika.spec.Basic.GetOk
+PikaBlockingChannel = pika_blocking.BlockingChannel
+PikaBasicProperties = pika.spec.BasicProperties
+PikaDeliveryTag = int
+PikaDeliveryMethod = pika.spec.Basic.Deliver
+PikaGetOkMethod = pika.spec.Basic.GetOk
 
 
 class PikaDeliveryMode(IntEnum):
