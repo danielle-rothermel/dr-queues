@@ -7,6 +7,11 @@ stage queues, scaling worker pools per stage, and recording run state in
 MongoDB. It is the execution substrate for experiment applications such as
 [dr-bottleneck](https://github.com/danielle-rothermel/dr-bottleneck).
 
+> **Project status:** dr-queues was an educational implementation experience
+> for understanding durable queue runtimes. For future queue-backed workflow
+> work, I expect to use an established task queue such as Celery or Dramatiq
+> rather than growing this library into a production framework.
+
 ## Install
 
 ```bash
